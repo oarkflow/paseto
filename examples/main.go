@@ -30,9 +30,6 @@ func main() {
 	if decrypted.Err() != nil {
 		panic(decrypted.Err())
 	}
-	if decrypted.HasFooter() {
-		panic("footer was not passed")
-	}
 	var claim paseto.RegisteredClaims
 	err = decrypted.ScanClaims(&claim)
 	if err != nil {
