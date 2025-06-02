@@ -30,19 +30,15 @@ func (t *Token) ScanClaims(claims Claims) error {
 }
 
 func (t *Token) scan(claims Claims, footer interface{}) error {
-
 	if t.err != nil {
 		return t.err
 	}
-
 	if err := json.Unmarshal(t.claims, claims); err != nil {
 		return fmt.Errorf("can't perform json unmarshal for provided claims: %w", err)
 	}
-
 	if err := claims.Valid(); err != nil {
 		return err
 	}
-
 	if footer != nil {
 		if len(t.footer) == 0 {
 			return fmt.Errorf("can't decode footer: destination for footer was provided, however there is no footer in token")
@@ -51,7 +47,5 @@ func (t *Token) scan(claims Claims, footer interface{}) error {
 			return err
 		}
 	}
-
 	return nil
-
 }

@@ -11,7 +11,7 @@ type purpose string
 
 const (
 	purposeLocal purpose = "local"
-	
+
 	purposePublic purpose = "public"
 )
 
@@ -97,14 +97,24 @@ func WithFooter(footer interface{}) ProvidedOption {
 }
 
 // WithAssert adds implicit assertion to PASETO token
-// Implicit assertion is unencrypted but authenticated data (like the optional footer), but is NOT stored in the PASETO token (thus, implicit)
-// and MUST be asserted when verifying a token.
+// Implicit assertion is unencrypted but authenticated data.
 func WithAssert(assertion []byte) ProvidedOption {
 	return func(o *optional) error {
 		if assertion == nil {
-			return errors.New("nil assertion was passed to WuthAssert function")
+			return errors.New("nil assertion was passed to WithAssert function")
 		}
 		o.assertion = assertion
 		return nil
 	}
 }
+
+// ErrMalformedToken indicates that obtained token was not properly formed
+var ErrMalformedToken = errors.New("token is malformed")
+
+// ErrInvalidSignature is returned when signature in invalid for provided message.
+var ErrInvalidSignature = errors.New("invalid token signature")
+
+// SymmetricKey is used in encryption and decryption routines.
+type SymmetricKey []byte
+
+var headerPurposePublic = "public"
