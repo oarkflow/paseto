@@ -3,11 +3,12 @@ package main
 import (
 	"fmt"
 	"time"
-	
+
 	"github.com/oarkflow/paseto"
 )
 
 func main() {
+	start := time.Now()
 	secret := "OdR4DlWhZk6osDd0qXLdVT88lHOvj14K"
 	v4 := paseto.NewPV4Local()
 	key, err := paseto.NewSymmetricKey([]byte(secret), paseto.Version4)
@@ -30,6 +31,7 @@ func main() {
 	if decrypted.Err() != nil {
 		panic(decrypted.Err())
 	}
+	fmt.Println("Since, elapsed:", time.Since(start))
 	var claim paseto.RegisteredClaims
 	err = decrypted.ScanClaims(&claim)
 	if err != nil {
