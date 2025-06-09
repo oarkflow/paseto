@@ -399,6 +399,27 @@ func readString(data []byte, idx *int) (string, error) {
 	return s, nil
 }
 
+// Add pools for reusing key slices.
+var headerKeysPool = sync.Pool{
+	New: func() interface{} { return make([]string, 0, 8) },
+}
+
+var claimKeysPool = sync.Pool{
+	New: func() interface{} { return make([]string, 0, 8) },
+}
+
+var footerKeysPool = sync.Pool{
+	New: func() interface{} { return make([]string, 0, 8) },
+}
+
+// Add a pool for reusing nonce slices.
+var noncePool = sync.Pool{
+	New: func() interface{} {
+		nonce := make([]byte, chacha20poly1305.NonceSizeX)
+		return &nonce
+	},
+}
+
 // serializeToken manually encodes the Token into a byte slice
 func serializeToken(t *Token) ([]byte, error) {
 	if t == nil {
@@ -422,7 +443,8 @@ func serializeToken(t *Token) ([]byte, error) {
 	buf = buf[:0] // reset
 
 	// HEADER: count (uint16) + sorted key/value
-	hkeys := make([]string, 0, len(t.Header))
+	hkeys := headerKeysPool.Get().([]string)
+	hkeys = hkeys[:0]
 	for k := range t.Header {
 		hkeys = append(hkeys, k)
 	}
@@ -434,6 +456,7 @@ func serializeToken(t *Token) ([]byte, error) {
 		appendString(&buf, k)
 		appendString(&buf, v)
 	}
+	headerKeysPool.Put(hkeys)
 
 	// ID
 	appendString(&buf, t.ID)
@@ -448,7 +471,8 @@ func serializeToken(t *Token) ([]byte, error) {
 	}
 
 	// CLAIMS: count + sorted key/value, JSON-encode values
-	keys := make([]string, 0, len(t.Claims))
+	keys := claimKeysPool.Get().([]string)
+	keys = keys[:0]
 	for k := range t.Claims {
 		keys = append(keys, k)
 	}
@@ -460,14 +484,17 @@ func serializeToken(t *Token) ([]byte, error) {
 		jsonVal, err := json.Marshal(v)
 		if err != nil {
 			bytePool.Put(ptr)
+			claimKeysPool.Put(keys)
 			return nil, ErrInvalidToken
 		}
 		appendString(&buf, k)
 		appendString(&buf, string(jsonVal))
 	}
+	claimKeysPool.Put(keys)
 
 	// FOOTER: count + sorted key/value
-	fkeys := make([]string, 0, len(t.Footer))
+	fkeys := footerKeysPool.Get().([]string)
+	fkeys = fkeys[:0]
 	for k := range t.Footer {
 		fkeys = append(fkeys, k)
 	}
@@ -479,6 +506,7 @@ func serializeToken(t *Token) ([]byte, error) {
 		appendString(&buf, k)
 		appendString(&buf, v)
 	}
+	footerKeysPool.Put(fkeys)
 
 	// BLACKLISTED FLAG
 	if t.Blacklisted {
@@ -652,14 +680,27 @@ func Encrypt(key, plaintext []byte) ([]byte, error) {
 	}
 	defer aeadPool.Put(aeadItem)
 
-	nonce := make([]byte, chacha20poly1305.NonceSizeX)
+	// Get a nonce slice from the pool.
+	np := noncePool.Get().(*[]byte)
+	nonce := *np
 	if _, err := rand.Read(nonce); err != nil {
+		noncePool.Put(np)
 		return nil, err
 	}
 
-	dst := make([]byte, 0, len(nonce)+len(plaintext)+aead.Overhead())
-	dst = append(dst, nonce...)
+	// Pre-calculate output length and allocate one result slice.
+	outputLen := len(nonce) + len(plaintext) + aead.Overhead()
+	dst := make([]byte, outputLen)
+	// Copy nonce into dst.
+	copy(dst, nonce)
+	// The actual nonce length.
+	dst = dst[:len(nonce)]
+	// Seal appends ciphertext.
 	dst = aead.Seal(dst, nonce, plaintext, nil)
+
+	// Return nonce slice to the pool.
+	noncePool.Put(np)
+
 	return dst, nil
 }
 
