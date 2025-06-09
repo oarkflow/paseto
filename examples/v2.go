@@ -8,6 +8,7 @@ import (
 	"log"
 	"time"
 
+	"github.com/hashicorp/vault/shamir"
 	"github.com/oarkflow/paseto/token"
 )
 
@@ -23,6 +24,10 @@ func main() {
 	revocationTest()
 	revokeByStringTest()
 	checkRevokedStringTest()
+
+	// New examples for Shamir Secret Sharing and rotating secret keys:
+	shamirSSSTest()
+	rotateSecretWithKMTest()
 }
 
 func symmetricTest() {
@@ -116,7 +121,6 @@ func refreshTokenTest() {
 	key := make([]byte, 32)
 	_, _ = rand.Read(key)
 
-	// Create a refresh token with custom TTL
 	rt := token.CreateRefreshToken(24 * time.Hour)
 	_ = token.RegisterClaim(rt, "user_id", "42")
 
@@ -126,14 +130,12 @@ func refreshTokenTest() {
 	}
 	fmt.Println("Encrypted Refresh Token:", encryptedRT)
 
-	// Simulate using the refresh token to issue a new access token
 	newAccess, err := token.RefreshToken(encryptedRT, key, 15*time.Minute)
 	if err != nil {
 		log.Fatal("refresh failed:", err)
 	}
 	fmt.Println("New Access Token:", newAccess)
 
-	// Decrypt the new access token and inspect claims
 	decryptedAccess, err := token.DecryptToken(newAccess, key)
 	if err != nil {
 		log.Fatal("decrypt new access failed:", err)
@@ -147,7 +149,6 @@ func revocationTest() {
 	key := make([]byte, 32)
 	_, _ = rand.Read(key)
 
-	// Create a token and encrypt it
 	t := token.CreateToken(5*time.Minute, token.AlgEncrypt)
 	_ = token.RegisterClaim(t, "user", "bob")
 
@@ -157,10 +158,8 @@ func revocationTest() {
 	}
 	fmt.Println("Token before revocation:", encrypted)
 
-	// Revoke by ID
 	_ = token.RevokeID(t.ID, t.ExpiresAt)
 
-	// Attempt to decrypt after revocation
 	_, err = token.DecryptToken(encrypted, key)
 	if err != nil {
 		fmt.Println("Revocation succeeded, token invalid:", err)
@@ -170,7 +169,6 @@ func revocationTest() {
 	fmt.Println()
 }
 
-// revokeByStringTest demonstrates revoking directly by the encrypted string.
 func revokeByStringTest() {
 	fmt.Println("=== Revoke By String Test ===")
 	key := make([]byte, 32)
@@ -200,7 +198,6 @@ func revokeByStringTest() {
 	fmt.Println()
 }
 
-// checkRevokedStringTest demonstrates checking if a token string is revoked.
 func checkRevokedStringTest() {
 	fmt.Println("=== IsRevokedToken Test ===")
 	key := make([]byte, 32)
@@ -221,7 +218,6 @@ func checkRevokedStringTest() {
 	}
 	fmt.Println("Initially revoked?", revoked)
 
-	// Revoke by ID directly
 	_ = token.RevokeID(t.ID, t.ExpiresAt)
 	revoked, err = token.IsRevokedToken(encrypted, key)
 	if err != nil {
@@ -229,7 +225,6 @@ func checkRevokedStringTest() {
 	}
 	fmt.Println("Revoked after RevokeID?", revoked)
 
-	// Also test revocation via string:
 	t2 := token.CreateToken(5*time.Minute, token.AlgEncrypt)
 	_ = token.RegisterClaim(t2, "user", "eve")
 	encrypted2, _ := token.EncryptToken(t2, key)
@@ -247,4 +242,140 @@ func checkRevokedStringTest() {
 	}
 	fmt.Println("Token2 revoked after RevokeToken?", revoked2)
 	fmt.Println()
+}
+
+// shamirSSSTest demonstrates splitting a 32-byte master key into shares,
+// reconstructing it from any threshold subset, and using it to encrypt/decrypt.
+func shamirSSSTest() {
+	fmt.Println("=== Shamir Secret Sharing Test ===")
+
+	// 1) Generate a 32-byte master key.
+	masterKey := make([]byte, 32)
+	_, _ = rand.Read(masterKey)
+	fmt.Printf("Master Key: %x\n", masterKey)
+
+	// 2) Split into N=5 shares with threshold M=3.
+	N, M := 5, 3
+	shares, err := shamir.Split(masterKey, N, M)
+	if err != nil {
+		log.Fatal("shamir.Split failed:", err)
+	}
+	fmt.Println("Shares:")
+	for i, share := range shares {
+		fmt.Printf("  Share %d: %x\n", i+1, share)
+	}
+	fmt.Println()
+
+	// 3) Reconstruct from any 3 shares (e.g., shares[0], shares[2], shares[4]).
+	comb := [][]byte{shares[0], shares[2], shares[4]}
+	recovered, err := shamir.Combine(comb)
+	if err != nil {
+		log.Fatal("shamir.Combine failed:", err)
+	}
+	fmt.Printf("Reconstructed Key: %x\n", recovered)
+	fmt.Println()
+
+	// 4) Verify that recovered == masterKey.
+	if !compare(masterKey, recovered) {
+		log.Fatal("Recovered key does not match master key")
+	}
+	fmt.Println("Shamir reconstruction succeeded!")
+
+	// 5) Use recovered as encryption key to encrypt a token.
+	t := token.CreateToken(10*time.Minute, token.AlgEncrypt)
+	_ = token.RegisterClaim(t, "user_id", "1001")
+
+	encrypted, err := token.EncryptToken(t, recovered)
+	if err != nil {
+		log.Fatal("encrypt failed:", err)
+	}
+	fmt.Println("Encrypted with recovered key:", encrypted)
+
+	// 6) Decrypt with recovered key.
+	decrypted, err := token.DecryptToken(encrypted, recovered)
+	if err != nil {
+		log.Fatal("decrypt failed:", err)
+	}
+	fmt.Println("Decrypted Claim:", decrypted.Claims)
+	fmt.Println()
+}
+
+// rotateSecretWithKMTest demonstrates rotating keys via KeyManager, and using DecryptWithKM
+// so that tokens encrypted under "old" and "new" keys remain valid until expiry.
+func rotateSecretWithKMTest() {
+	fmt.Println("=== Rotate Secret Key with KeyManager Test ===")
+
+	// 1) Create a KeyManager that rotates every 10 seconds, keeps up to 2 old keys,
+	//    and uses N=5 total shares with threshold M=3.
+	km, err := token.NewKeyManager(10*time.Second, 2, 5, 3)
+	if err != nil {
+		log.Fatal("NewKeyManager failed:", err)
+	}
+
+	// 2) Obtain current (initial) key from KeyManager.
+	initialKeyID, initialKey := km.GetCurrentKey()
+	fmt.Printf("Initial KeyID: %s, Key: %x\n", initialKeyID, initialKey)
+
+	// 3) Encrypt a token using KeyManager helper (EncryptWithKM) so header["kid"]=initialKeyID.
+	t := token.CreateToken(1*time.Minute, token.AlgEncrypt)
+	_ = token.RegisterClaim(t, "session", "abc123")
+
+	encrypted, err := token.EncryptWithKM(km, t)
+	if err != nil {
+		log.Fatal("EncryptWithKM failed:", err)
+	}
+	fmt.Printf("Token encrypted under KeyID %s: %s\n", initialKeyID, encrypted)
+
+	// 4) Decrypt immediately via KeyManager (DecryptWithKM).
+	decrypted, err := token.DecryptWithKM(km, encrypted)
+	if err != nil {
+		log.Fatal("DecryptWithKM failed:", err)
+	}
+	fmt.Println("Decrypted payload with initial key:", decrypted.Claims)
+
+	// 5) Wait for rotation (sleep > rotationPeriod). This forces KeyManager to generate a new key.
+	time.Sleep(11 * time.Second)
+
+	// 6) Get new current key from KeyManager.
+	newKeyID, newKey := km.GetCurrentKey()
+	fmt.Printf("New KeyID: %s, Key: %x\n", newKeyID, newKey)
+
+	// 7) Encrypt a fresh token under the new key.
+	t2 := token.CreateToken(1*time.Minute, token.AlgEncrypt)
+	_ = token.RegisterClaim(t2, "session", "def456")
+
+	encrypted2, err := token.EncryptWithKM(km, t2)
+	if err != nil {
+		log.Fatal("EncryptWithKM for new token failed:", err)
+	}
+	fmt.Printf("New token encrypted under KeyID %s: %s\n", newKeyID, encrypted2)
+
+	// 8) Decrypt the first (old) token using DecryptWithKM; KeyManager will try both oldKeyID and newKeyID.
+	decryptedOldAgain, err := token.DecryptWithKM(km, encrypted)
+	if err != nil {
+		log.Fatal("Old token no longer decryptable by DecryptWithKM:", err)
+	}
+	fmt.Println("Old token still decrypts via DecryptWithKM:", decryptedOldAgain.Claims)
+
+	// 9) Decrypt the new token with DecryptWithKM (should pick up newKeyID).
+	decryptedNew, err := token.DecryptWithKM(km, encrypted2)
+	if err != nil {
+		log.Fatal("New token not decryptable by DecryptWithKM:", err)
+	}
+	fmt.Println("New token decrypts via DecryptWithKM:", decryptedNew.Claims)
+
+	fmt.Println()
+}
+
+// compare returns true if two byte slices are equal.
+func compare(a, b []byte) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }

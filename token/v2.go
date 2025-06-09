@@ -10,12 +10,14 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/hashicorp/vault/shamir"
 	"golang.org/x/crypto/chacha20poly1305"
 )
 
@@ -141,7 +143,7 @@ func ValidateKey(key []byte) error {
 // CreateToken issues a new token with security headers
 func CreateToken(ttl time.Duration, alg string, ids ...string) *Token {
 	var keyID string
-	if len(ids) > 0 && ids[0] != "" {
+	if len(ids) > 0 {
 		keyID = strings.TrimSpace(ids[0])
 	}
 	now := time.Now().UTC()
@@ -172,7 +174,7 @@ func CreateToken(ttl time.Duration, alg string, ids ...string) *Token {
 // CreateRefreshToken issues a refresh token
 func CreateRefreshToken(ttl time.Duration, ids ...string) *Token {
 	var keyID string
-	if len(ids) > 0 && ids[0] != "" {
+	if len(ids) > 0 {
 		keyID = strings.TrimSpace(ids[0])
 	}
 	t := CreateToken(ttl, AlgEncrypt, keyID)
@@ -363,7 +365,9 @@ func ScanClaims(t *Token, fn func(key string, value any) bool) {
 	}
 }
 
-// bytePool holds a reusable byte slice buffer to minimize allocations.
+//  SERIALIZATION / DESERIALIZATION (MANUAL, ZERO-ALLOC BEYOND POOL)
+
+// bytePool holds a reusable byte slice to minimize allocations.
 var bytePool = sync.Pool{
 	New: func() any {
 		b := make([]byte, 0, 4096)
@@ -404,12 +408,20 @@ func serializeToken(t *Token) ([]byte, error) {
 		return nil, ErrInvalidToken
 	}
 
+	// Validate state
+	if IsExpired(t) || IsNotYetValid(t) || t.Blacklisted {
+		return nil, ErrInvalidToken
+	}
+	if revoked, err := IsRevokedID(t.ID); err != nil || revoked {
+		return nil, ErrInvalidToken
+	}
+
 	// Grab buffer from pool
 	ptr := bytePool.Get().(*[]byte)
 	buf := *ptr
 	buf = buf[:0] // reset
 
-	// Header: write count (uint16), then sorted key/value
+	// HEADER: count (uint16) + sorted key/value
 	hkeys := make([]string, 0, len(t.Header))
 	for k := range t.Header {
 		hkeys = append(hkeys, k)
@@ -426,16 +438,16 @@ func serializeToken(t *Token) ([]byte, error) {
 	// ID
 	appendString(&buf, t.ID)
 
-	// Times: IssuedAt, NotBefore, ExpiresAt as UnixNano (8 bytes each)
+	// Times: IssuedAt, NotBefore, ExpiresAt (UnixNano each, 8 bytes)
 	ts := []time.Time{t.IssuedAt, t.NotBefore, t.ExpiresAt}
 	for _, tm := range ts {
-		n := tm.UnixNano()
+		nano := tm.UnixNano()
 		var b [8]byte
-		binary.BigEndian.PutUint64(b[:], uint64(n))
+		binary.BigEndian.PutUint64(b[:], uint64(nano))
 		buf = append(buf, b[:]...)
 	}
 
-	// Claims: write count (uint16), then sorted key/value
+	// CLAIMS: count + sorted key/value, JSON-encode values
 	keys := make([]string, 0, len(t.Claims))
 	for k := range t.Claims {
 		keys = append(keys, k)
@@ -445,7 +457,6 @@ func serializeToken(t *Token) ([]byte, error) {
 	buf = append(buf, byte(count>>8), byte(count))
 	for _, k := range keys {
 		v := t.Claims[k]
-		// JSON encode values for deterministic serialization
 		jsonVal, err := json.Marshal(v)
 		if err != nil {
 			bytePool.Put(ptr)
@@ -455,7 +466,7 @@ func serializeToken(t *Token) ([]byte, error) {
 		appendString(&buf, string(jsonVal))
 	}
 
-	// Footer: write count, then sorted key/value
+	// FOOTER: count + sorted key/value
 	fkeys := make([]string, 0, len(t.Footer))
 	for k := range t.Footer {
 		fkeys = append(fkeys, k)
@@ -469,7 +480,7 @@ func serializeToken(t *Token) ([]byte, error) {
 		appendString(&buf, v)
 	}
 
-	// Blacklisted flag (1 byte)
+	// BLACKLISTED FLAG
 	if t.Blacklisted {
 		buf = append(buf, 1)
 	} else {
@@ -487,7 +498,7 @@ func deserializeToken(data []byte) (*Token, error) {
 	}
 	idx := 0
 
-	// Header
+	// HEADER
 	if idx+2 > len(data) {
 		return nil, ErrInvalidToken
 	}
@@ -529,7 +540,7 @@ func deserializeToken(data []byte) (*Token, error) {
 	expiresAt := int64(binary.BigEndian.Uint64(data[idx : idx+8]))
 	idx += 8
 
-	// Claims
+	// CLAIMS
 	if idx+2 > len(data) {
 		return nil, ErrInvalidToken
 	}
@@ -545,8 +556,6 @@ func deserializeToken(data []byte) (*Token, error) {
 		if err != nil {
 			return nil, ErrInvalidToken
 		}
-
-		// JSON decode values
 		var val any
 		if err := json.Unmarshal([]byte(v), &val); err != nil {
 			return nil, ErrInvalidToken
@@ -554,7 +563,7 @@ func deserializeToken(data []byte) (*Token, error) {
 		claims[k] = val
 	}
 
-	// Footer
+	// FOOTER
 	if idx+2 > len(data) {
 		return nil, ErrInvalidToken
 	}
@@ -573,7 +582,7 @@ func deserializeToken(data []byte) (*Token, error) {
 		footer[k] = v
 	}
 
-	// Blacklisted flag
+	// BLACKLISTED FLAG
 	if idx+1 > len(data) {
 		return nil, ErrInvalidToken
 	}
@@ -590,12 +599,10 @@ func deserializeToken(data []byte) (*Token, error) {
 		Blacklisted: black,
 	}
 
-	// Validate time/blacklist/revocation
+	// Validate state
 	if IsExpired(t) || IsNotYetValid(t) || t.Blacklisted {
 		return nil, ErrInvalidToken
 	}
-
-	// Check revocation status
 	if revoked, err := IsRevokedID(t.ID); err != nil || revoked {
 		return nil, ErrInvalidToken
 	}
@@ -603,7 +610,8 @@ func deserializeToken(data []byte) (*Token, error) {
 	return t, nil
 }
 
-// AEAD pool for efficient encryption/decryption
+//  AEAD POOL FOR EFFICIENT XChaCha20‐POLY1305
+
 var aeadPool = sync.Pool{
 	New: func() any {
 		return &struct {
@@ -613,25 +621,28 @@ var aeadPool = sync.Pool{
 	},
 }
 
-// Encrypt performs XChaCha20-Poly1305 AEAD encryption
+// EncryptionAEAD produces a new XChaCha20‐Poly1305 AEAD instance
+func EncryptionAEAD(key []byte) (cipher.AEAD, error) {
+	return chacha20poly1305.NewX(key)
+}
+
+// Encrypt performs XChaCha20‐Poly1305 AEAD encryption, minimizing heap churn
 func Encrypt(key, plaintext []byte) ([]byte, error) {
 	if err := ValidateKey(key); err != nil {
 		return nil, err
 	}
 
-	// Get AEAD from pool or create new
 	aeadItem := aeadPool.Get().(*struct {
 		aead cipher.AEAD
 		key  []byte
 	})
 
-	// Reuse if same key, else create new
 	var aead cipher.AEAD
 	var err error
 	if aeadItem.aead != nil && subtle.ConstantTimeCompare(aeadItem.key, key) == 1 {
 		aead = aeadItem.aead
 	} else {
-		aead, err = chacha20poly1305.NewX(key)
+		aead, err = EncryptionAEAD(key)
 		if err != nil {
 			aeadPool.Put(aeadItem)
 			return nil, err
@@ -646,14 +657,13 @@ func Encrypt(key, plaintext []byte) ([]byte, error) {
 		return nil, err
 	}
 
-	// Preallocate dst: nonce + plaintext + tag
 	dst := make([]byte, 0, len(nonce)+len(plaintext)+aead.Overhead())
 	dst = append(dst, nonce...)
 	dst = aead.Seal(dst, nonce, plaintext, nil)
 	return dst, nil
 }
 
-// Decrypt performs AEAD.Open with XChaCha20-Poly1305
+// Decrypt performs AEAD.Open with XChaCha20‐Poly1305
 func Decrypt(key, ciphertext []byte) ([]byte, error) {
 	if err := ValidateKey(key); err != nil {
 		return nil, ErrInvalidToken
@@ -662,7 +672,6 @@ func Decrypt(key, ciphertext []byte) ([]byte, error) {
 		return nil, ErrInvalidToken
 	}
 
-	// Get AEAD from pool or create new
 	aeadItem := aeadPool.Get().(*struct {
 		aead cipher.AEAD
 		key  []byte
@@ -712,7 +721,7 @@ func DecodeBase64URL(data string) ([]byte, error) {
 // EncryptToken serializes then encrypts the Token
 func EncryptToken(t *Token, key []byte, ids ...string) (string, error) {
 	var keyID string
-	if len(ids) > 0 && ids[0] != "" {
+	if len(ids) > 0 {
 		keyID = strings.TrimSpace(ids[0])
 	}
 	if t.Header == nil {
@@ -750,20 +759,10 @@ func DecryptToken(encoded string, key []byte) (*Token, error) {
 	return deserializeToken(plain)
 }
 
-// Sign returns an Ed25519 signature
-func Sign(privateKey ed25519.PrivateKey, payload []byte) []byte {
-	return ed25519.Sign(privateKey, payload)
-}
-
-// VerifySignature verifies an Ed25519 signature
-func VerifySignature(publicKey ed25519.PublicKey, payload, sig []byte) bool {
-	return ed25519.Verify(publicKey, payload, sig)
-}
-
 // SignToken serializes t, then signs the bytes
 func SignToken(t *Token, priv ed25519.PrivateKey, ids ...string) (*SignedToken, error) {
 	var keyID string
-	if len(ids) > 0 && ids[0] != "" {
+	if len(ids) > 0 {
 		keyID = strings.TrimSpace(ids[0])
 	}
 	if t.Header == nil {
@@ -778,7 +777,7 @@ func SignToken(t *Token, priv ed25519.PrivateKey, ids ...string) (*SignedToken, 
 	if err != nil {
 		return nil, ErrInvalidToken
 	}
-	sig := Sign(priv, payload)
+	sig := ed25519.Sign(priv, payload)
 	return &SignedToken{Payload: payload, Signature: sig}, nil
 }
 
@@ -787,7 +786,7 @@ func VerifyToken(s *SignedToken, pub ed25519.PublicKey) (*Token, error) {
 	if s == nil || len(s.Payload) == 0 || len(s.Signature) != ed25519.SignatureSize {
 		return nil, ErrInvalidToken
 	}
-	if !VerifySignature(pub, s.Payload, s.Signature) {
+	if !ed25519.Verify(pub, s.Payload, s.Signature) {
 		return nil, ErrInvalidToken
 	}
 	return deserializeToken(s.Payload)
@@ -850,7 +849,13 @@ func RefreshToken(refreshTokenEncoded string, key []byte, newTTL time.Duration) 
 }
 
 // DeterministicToken for reproducible tests
-func DeterministicToken(now time.Time, claims map[string]any, footer map[string]string, ttl time.Duration, ids ...string) *Token {
+func DeterministicToken(
+	now time.Time,
+	claims map[string]any,
+	footer map[string]string,
+	ttl time.Duration,
+	ids ...string,
+) *Token {
 	var keyID string
 	if len(ids) > 0 && ids[0] != "" {
 		keyID = strings.TrimSpace(ids[0])
@@ -930,14 +935,13 @@ func parseTokenRaw(encoded string, key []byte) (*Token, error) {
 	return deserializeTokenRaw(plain)
 }
 
-// deserializeTokenRaw decodes without validation
 func deserializeTokenRaw(data []byte) (*Token, error) {
 	if len(data) == 0 {
 		return nil, ErrInvalidToken
 	}
 	idx := 0
 
-	// Header
+	// HEADER
 	if idx+2 > len(data) {
 		return nil, ErrInvalidToken
 	}
@@ -973,7 +977,7 @@ func deserializeTokenRaw(data []byte) (*Token, error) {
 	expiresAt := int64(binary.BigEndian.Uint64(data[idx : idx+8]))
 	idx += 8
 
-	// Claims
+	// CLAIMS
 	if idx+2 > len(data) {
 		return nil, ErrInvalidToken
 	}
@@ -989,8 +993,6 @@ func deserializeTokenRaw(data []byte) (*Token, error) {
 		if err != nil {
 			return nil, ErrInvalidToken
 		}
-
-		// JSON decode values
 		var val any
 		if err := json.Unmarshal([]byte(v), &val); err != nil {
 			return nil, ErrInvalidToken
@@ -998,7 +1000,7 @@ func deserializeTokenRaw(data []byte) (*Token, error) {
 		claims[k] = val
 	}
 
-	// Footer
+	// FOOTER
 	if idx+2 > len(data) {
 		return nil, ErrInvalidToken
 	}
@@ -1017,7 +1019,7 @@ func deserializeTokenRaw(data []byte) (*Token, error) {
 		footer[k] = v
 	}
 
-	// Blacklisted flag
+	// BLACKLISTED FLAG
 	if idx+1 > len(data) {
 		return nil, ErrInvalidToken
 	}
@@ -1034,4 +1036,219 @@ func deserializeTokenRaw(data []byte) (*Token, error) {
 		Blacklisted: black,
 	}
 	return t, nil
+}
+
+// KeyManager holds a small ring of currently valid symmetric keys (keyID→keyBytes).
+// Each rotation generates a fresh 32-byte key, splits it via Shamir, and stores both the key
+// and its shares.  Older keys are pruned after a configurable period.
+type KeyManager struct {
+	sync.RWMutex
+	// keyRing maps keyID → (keyBytes, expiresAt)
+	keyRing        map[string]keyInfo
+	rotationPeriod time.Duration
+	cacheLimit     int
+	// sharesMap maps keyID → the [][]byte shares produced by shamir.Split,
+	// so that later you can persist or re‐combine them.
+	sharesMap map[string][][]byte
+}
+
+type keyInfo struct {
+	keyBytes  []byte
+	expiresAt time.Time
+}
+
+// NewKeyManager initializes a manager that rotates every rotationPeriod.
+// cacheLimit is how many keys to keep in memory at once.  N = total shares, M = threshold.
+func NewKeyManager(rotationPeriod time.Duration, cacheLimit, N, M int) (*KeyManager, error) {
+	if cacheLimit < 1 {
+		return nil, errors.New("cacheLimit must be ≥1")
+	}
+	if M > N || M < 2 {
+		return nil, errors.New("invalid Shamir parameters")
+	}
+
+	km := &KeyManager{
+		keyRing:        make(map[string]keyInfo),
+		rotationPeriod: rotationPeriod,
+		cacheLimit:     cacheLimit,
+		sharesMap:      make(map[string][][]byte),
+	}
+
+	// Immediately generate the first key
+	if err := km.rotateInternal(N, M); err != nil {
+		return nil, err
+	}
+
+	// Schedule subsequent rotations
+	ticker := time.NewTicker(rotationPeriod)
+	go func() {
+		for range ticker.C {
+			_ = km.rotateInternal(N, M)
+		}
+	}()
+
+	return km, nil
+}
+
+// rotateInternal generates a new 32-byte key, Shamir-splits it, and prunes old keys.
+func (km *KeyManager) rotateInternal(N, M int) error {
+	km.Lock()
+	defer km.Unlock()
+
+	// 1) Generate fresh 32-byte key
+	masterKey := make([]byte, chacha20poly1305.KeySize)
+	if _, err := rand.Read(masterKey); err != nil {
+		return err
+	}
+
+	// 2) Construct a new keyID (timestamp-based)
+	keyID := fmt.Sprintf("%d", time.Now().UTC().UnixNano())
+	expiry := time.Now().UTC().Add(km.rotationPeriod)
+	km.keyRing[keyID] = keyInfo{keyBytes: masterKey, expiresAt: expiry}
+
+	// 3) Split via Shamir into N shares (threshold M)
+	shares, err := shamir.Split(masterKey, N, M)
+	if err != nil {
+		return err
+	}
+	// Store them in-memory—for real use, persist these shares to secure storage.
+	km.sharesMap[keyID] = shares
+
+	// 4) Prune older keys beyond cacheLimit
+	if len(km.keyRing) > km.cacheLimit {
+		type pair struct {
+			id  string
+			exp time.Time
+		}
+		var lst []pair
+		for id, info := range km.keyRing {
+			lst = append(lst, pair{id: id, exp: info.expiresAt})
+		}
+		sort.Slice(lst, func(i, j int) bool {
+			return lst[i].exp.Before(lst[j].exp)
+		})
+		for i := 0; i < len(lst)-km.cacheLimit; i++ {
+			delete(km.keyRing, lst[i].id)
+			delete(km.sharesMap, lst[i].id)
+		}
+	}
+
+	return nil
+}
+
+// GetCurrentKey returns (keyID, keyBytes) for encryption—the newest key in the ring.
+func (km *KeyManager) GetCurrentKey() (string, []byte) {
+	km.RLock()
+	defer km.RUnlock()
+
+	var newestID string
+	var newestTime time.Time
+	for id, info := range km.keyRing {
+		if info.expiresAt.After(newestTime) {
+			newestTime = info.expiresAt
+			newestID = id
+		}
+	}
+	if newestID == "" {
+		return "", nil
+	}
+	return newestID, km.keyRing[newestID].keyBytes
+}
+
+// LookupKey returns the keyBytes for a given keyID, if it’s still in the ring and not expired.
+func (km *KeyManager) LookupKey(keyID string) ([]byte, bool) {
+	km.RLock()
+	defer km.RUnlock()
+	info, ok := km.keyRing[keyID]
+	if !ok {
+		return nil, false
+	}
+	if time.Now().UTC().After(info.expiresAt.Add(GetClockSkew())) {
+		return nil, false
+	}
+	return info.keyBytes, true
+}
+
+// SharesForKey returns the stored Shamir shares for a given keyID (nil if none).
+func (km *KeyManager) SharesForKey(keyID string) [][]byte {
+	km.RLock()
+	defer km.RUnlock()
+	return km.sharesMap[keyID]
+}
+
+// ImportKeyFromShares reconstructs a key from its Shamir shares and re‐inserts it under keyID.
+func (km *KeyManager) ImportKeyFromShares(keyID string, shares [][]byte, expiresAt time.Time) error {
+	km.Lock()
+	defer km.Unlock()
+	secret, err := shamir.Combine(shares)
+	if err != nil {
+		return err
+	}
+	km.keyRing[keyID] = keyInfo{keyBytes: secret, expiresAt: expiresAt}
+	return nil
+}
+
+// EncryptWithKM looks up the current key from km, sets Header["kid"], then encrypts.
+func EncryptWithKM(km *KeyManager, t *Token) (string, error) {
+	keyID, keyBytes := km.GetCurrentKey()
+	if keyID == "" {
+		return "", errors.New("no active key available")
+	}
+	return EncryptToken(t, keyBytes, keyID)
+}
+
+// DecryptWithKM reads Header["kid"] from the decrypted header bytes, then fetches the correct keyBytes.
+func DecryptWithKM(km *KeyManager, encoded string) (*Token, error) {
+	// 1) Decode base64
+	ciphertext, err := DecodeBase64URL(encoded)
+	if err != nil {
+		return nil, ErrInvalidToken
+	}
+	// 2) We need to peek at the decryption to extract keyID from the header.
+	//    We'll attempt with every key in the ring until one succeeds,
+	//    but we can optimize by inspecting the header prefix after a partial decrypt.
+	for keyID, info := range km.keyRing {
+		if time.Now().UTC().After(info.expiresAt.Add(GetClockSkew())) {
+			continue
+		}
+		// Try decrypt
+		plaintext, err2 := Decrypt(info.keyBytes, ciphertext)
+		if err2 != nil {
+			continue
+		}
+		// Now read the header from plaintext
+		decodedHeader, err3 := parseHeaderOnly(plaintext)
+		if err3 != nil {
+			continue
+		}
+		// If the header’s kid matches this keyID, we have a winner:
+		if decodedHeader[HeaderKeyID] == keyID {
+			// Full deserialize/validation
+			return deserializeToken(plaintext)
+		}
+	}
+	return nil, ErrInvalidToken
+}
+
+// parseHeaderOnly is a minimal pass to extract the header map from the decrypted plaintext.
+func parseHeaderOnly(data []byte) (map[string]string, error) {
+	idx := 0
+	if idx+2 > len(data) {
+		return nil, ErrInvalidToken
+	}
+	hcount := int(data[idx])<<8 | int(data[idx+1])
+	idx += 2
+	header := make(map[string]string, hcount)
+	for i := 0; i < hcount; i++ {
+		k, err := readString(data, &idx)
+		if err != nil {
+			return nil, ErrInvalidToken
+		}
+		v, err := readString(data, &idx)
+		if err != nil {
+			return nil, ErrInvalidToken
+		}
+		header[k] = v
+	}
+	return header, nil
 }
