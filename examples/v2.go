@@ -8,8 +8,8 @@ import (
 	"log"
 	"time"
 
-	"github.com/hashicorp/vault/shamir"
 	"github.com/oarkflow/paseto/token"
+	"github.com/oarkflow/shamir"
 )
 
 func main() {
@@ -255,8 +255,8 @@ func shamirSSSTest() {
 	fmt.Printf("Master Key: %x\n", masterKey)
 
 	// 2) Split into N=5 shares with threshold M=3.
-	N, M := 5, 3
-	shares, err := shamir.Split(masterKey, N, M)
+	threshold, totalShares := 3, 5
+	shares, err := shamir.Split(masterKey, threshold, totalShares)
 	if err != nil {
 		log.Fatal("shamir.Split failed:", err)
 	}
@@ -307,7 +307,7 @@ func rotateSecretWithKMTest() {
 
 	// 1) Create a KeyManager that rotates every 10 seconds, keeps up to 2 old keys,
 	//    and uses N=5 total shares with threshold M=3.
-	km, err := token.NewKeyManager(10*time.Second, 2, 5, 3)
+	km, err := token.NewKeyManager(10*time.Second, 2, 3, 5)
 	if err != nil {
 		log.Fatal("NewKeyManager failed:", err)
 	}

@@ -17,7 +17,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/hashicorp/vault/shamir"
+	"github.com/oarkflow/shamir"
 	"golang.org/x/crypto/chacha20poly1305"
 )
 
@@ -1100,12 +1100,9 @@ type keyInfo struct {
 
 // NewKeyManager initializes a manager that rotates every rotationPeriod.
 // cacheLimit is how many keys to keep in memory at once.  N = total shares, M = threshold.
-func NewKeyManager(rotationPeriod time.Duration, cacheLimit, N, M int) (*KeyManager, error) {
+func NewKeyManager(rotationPeriod time.Duration, cacheLimit, totalShares, threshold int) (*KeyManager, error) {
 	if cacheLimit < 1 {
 		return nil, errors.New("cacheLimit must be ≥1")
-	}
-	if M > N || M < 2 {
-		return nil, errors.New("invalid Shamir parameters")
 	}
 
 	km := &KeyManager{
@@ -1116,7 +1113,7 @@ func NewKeyManager(rotationPeriod time.Duration, cacheLimit, N, M int) (*KeyMana
 	}
 
 	// Immediately generate the first key
-	if err := km.rotateInternal(N, M); err != nil {
+	if err := km.rotateInternal(totalShares, threshold); err != nil {
 		return nil, err
 	}
 
@@ -1124,7 +1121,7 @@ func NewKeyManager(rotationPeriod time.Duration, cacheLimit, N, M int) (*KeyMana
 	ticker := time.NewTicker(rotationPeriod)
 	go func() {
 		for range ticker.C {
-			_ = km.rotateInternal(N, M)
+			_ = km.rotateInternal(totalShares, threshold)
 		}
 	}()
 
