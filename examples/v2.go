@@ -8,8 +8,9 @@ import (
 	"log"
 	"time"
 
-	"github.com/oarkflow/paseto/token"
 	"github.com/oarkflow/shamir"
+
+	"github.com/oarkflow/paseto/token"
 )
 
 func main() {
