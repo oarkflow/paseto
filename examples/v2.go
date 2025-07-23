@@ -29,6 +29,7 @@ func main() {
 	// New examples for Shamir Secret Sharing and rotating secret keys:
 	shamirSSSTest()
 	rotateSecretWithKMTest()
+	jwtCompatibleExample()
 }
 
 func symmetricTest() {
@@ -365,6 +366,48 @@ func rotateSecretWithKMTest() {
 	}
 	fmt.Println("New token decrypts via DecryptWithKM:", decryptedNew.Claims)
 
+	fmt.Println()
+}
+
+// jwtCompatibleExample demonstrates usage of NewWithClaims, SigningMethodEdDSA, and Parse.
+func jwtCompatibleExample() {
+	fmt.Println("=== JWT-Compatible API Example ===")
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		log.Fatal("keygen failed:", err)
+	}
+
+	claims := token.MapClaims{
+		"sub":  "user123",
+		"exp":  time.Now().Add(10 * time.Minute).Unix(),
+		"role": "admin",
+	}
+
+	t := token.NewWithClaims(token.SigningMethodEdDSA, claims)
+
+	// Serialize and sign
+	payload, err := token.SerializeToken(t)
+	if err != nil {
+		log.Fatal("serialize failed:", err)
+	}
+	sig, err := token.SigningMethodEdDSA.Sign(string(payload), priv)
+	if err != nil {
+		log.Fatal("sign failed:", err)
+	}
+	encoded := token.EncodeBase64URL(payload) + "." + token.EncodeBase64URL(sig)
+	fmt.Println("JWT-Compatible Signed Token:", encoded)
+
+	// Parse and verify
+	parsed, err := token.Parse(encoded, pub, token.SigningMethodEdDSA)
+	if err != nil {
+		log.Fatal("parse failed:", err)
+	}
+	fmt.Println("Parsed Claims:", parsed.Claims)
+	if err := token.MapClaims(parsed.Claims).Valid(); err != nil {
+		fmt.Println("Claims validation failed:", err)
+	} else {
+		fmt.Println("Claims validation succeeded!")
+	}
 	fmt.Println()
 }
 

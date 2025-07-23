@@ -420,8 +420,8 @@ var noncePool = sync.Pool{
 	},
 }
 
-// serializeToken manually encodes the Token into a byte slice
-func serializeToken(t *Token) ([]byte, error) {
+// SerializeToken manually encodes the Token into a byte slice
+func SerializeToken(t *Token) ([]byte, error) {
 	if t == nil {
 		return nil, ErrInvalidToken
 	}
@@ -773,7 +773,7 @@ func EncryptToken(t *Token, key []byte, ids ...string) (string, error) {
 		t.Header[HeaderKeyID] = keyID
 	}
 
-	plain, err := serializeToken(t)
+	plain, err := SerializeToken(t)
 	if err != nil {
 		return "", ErrInvalidToken
 	}
@@ -814,7 +814,7 @@ func SignToken(t *Token, priv ed25519.PrivateKey, ids ...string) (*SignedToken, 
 		t.Header[HeaderKeyID] = keyID
 	}
 
-	payload, err := serializeToken(t)
+	payload, err := SerializeToken(t)
 	if err != nil {
 		return nil, ErrInvalidToken
 	}
@@ -1289,4 +1289,148 @@ func parseHeaderOnly(data []byte) (map[string]string, error) {
 		header[k] = v
 	}
 	return header, nil
+}
+
+// JWT compatibility types and functions
+
+// MapClaims is a map of string to interface{}, compatible with jwt.MapClaims
+// Provides validation helpers for exp, nbf, iat, etc.
+type MapClaims map[string]interface{}
+
+// Valid validates time-based claims (exp, nbf, iat)
+func (m MapClaims) Valid() error {
+	now := time.Now().UTC().Unix()
+	if exp, ok := m["exp"]; ok {
+		switch v := exp.(type) {
+		case float64:
+			if now > int64(v) {
+				return ErrInvalidToken
+			}
+		case int64:
+			if now > v {
+				return ErrInvalidToken
+			}
+		}
+	}
+	if nbf, ok := m["nbf"]; ok {
+		switch v := nbf.(type) {
+		case float64:
+			if now < int64(v) {
+				return ErrInvalidToken
+			}
+		case int64:
+			if now < v {
+				return ErrInvalidToken
+			}
+		}
+	}
+	if iat, ok := m["iat"]; ok {
+		switch v := iat.(type) {
+		case float64:
+			if now < int64(v) {
+				return ErrInvalidToken
+			}
+		case int64:
+			if now < v {
+				return ErrInvalidToken
+			}
+		}
+	}
+	return nil
+}
+
+// SigningMethod is compatible with jwt.SigningMethod
+// Provides methods for signing and verifying tokens
+// Only EdDSA and XC20P supported here
+
+type SigningMethod interface {
+	Alg() string
+	Sign(signingString string, key interface{}) ([]byte, error)
+	Verify(signingString string, sig []byte, key interface{}) error
+}
+
+// SigningMethodEdDSA implements EdDSA signing
+var SigningMethodEdDSA = &signingMethodEdDSA{}
+
+type signingMethodEdDSA struct{}
+
+func (m *signingMethodEdDSA) Alg() string { return AlgSign }
+func (m *signingMethodEdDSA) Sign(signingString string, key interface{}) ([]byte, error) {
+	priv, ok := key.(ed25519.PrivateKey)
+	if !ok {
+		return nil, errors.New("invalid Ed25519 private key")
+	}
+	return ed25519.Sign(priv, []byte(signingString)), nil
+}
+func (m *signingMethodEdDSA) Verify(signingString string, sig []byte, key interface{}) error {
+	pub, ok := key.(ed25519.PublicKey)
+	if !ok {
+		return errors.New("invalid Ed25519 public key")
+	}
+	if !ed25519.Verify(pub, []byte(signingString), sig) {
+		return ErrInvalidToken
+	}
+	return nil
+}
+
+// SigningMethodXC20P implements symmetric encryption (not JWT standard, but for compatibility)
+var SigningMethodXC20P = &signingMethodXC20P{}
+
+type signingMethodXC20P struct{}
+
+func (m *signingMethodXC20P) Alg() string { return AlgEncrypt }
+func (m *signingMethodXC20P) Sign(signingString string, key interface{}) ([]byte, error) {
+	k, ok := key.([]byte)
+	if !ok {
+		return nil, errors.New("invalid XC20P key")
+	}
+	return Encrypt(k, []byte(signingString))
+}
+func (m *signingMethodXC20P) Verify(signingString string, sig []byte, key interface{}) error {
+	k, ok := key.([]byte)
+	if !ok {
+		return errors.New("invalid XC20P key")
+	}
+	plaintext, err := Decrypt(k, sig)
+	if err != nil {
+		return ErrInvalidToken
+	}
+	if string(plaintext) != signingString {
+		return ErrInvalidToken
+	}
+	return nil
+}
+
+// NewWithClaims creates a new token with the specified signing method and claims (JWT compatible)
+func NewWithClaims(method SigningMethod, claims MapClaims) *Token {
+	t := CreateToken(1*time.Hour, method.Alg()) // Default 1h TTL, override as needed
+	for k, v := range claims {
+		t.Claims[k] = v
+	}
+	return t
+}
+
+// Parse parses a JWT-like token string and validates its signature (JWT compatible)
+func Parse(tokenString string, key interface{}, method SigningMethod) (*Token, error) {
+	parts := strings.Split(tokenString, ".")
+	if len(parts) == 2 {
+		// Signed token: payload.signature
+		payload, err := DecodeBase64URL(parts[0])
+		if err != nil {
+			return nil, ErrInvalidToken
+		}
+		sig, err := DecodeBase64URL(parts[1])
+		if err != nil {
+			return nil, ErrInvalidToken
+		}
+		if err := method.Verify(string(payload), sig, key); err != nil {
+			return nil, ErrInvalidToken
+		}
+		t, err := deserializeToken(payload)
+		if err != nil {
+			return nil, ErrInvalidToken
+		}
+		return t, nil
+	}
+	return nil, ErrInvalidToken
 }
