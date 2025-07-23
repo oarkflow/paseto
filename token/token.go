@@ -1434,3 +1434,16 @@ func Parse(tokenString string, key interface{}, method SigningMethod) (*Token, e
 	}
 	return nil, ErrInvalidToken
 }
+
+// ParseWithClaims parses a JWT-like token string, validates its signature, and fills the provided claims (JWT compatible)
+func ParseWithClaims(tokenString string, claims MapClaims, key interface{}, method SigningMethod) (*Token, error) {
+	t, err := Parse(tokenString, key, method)
+	if err != nil {
+		return nil, err
+	}
+	// Copy claims from token to provided claims map
+	for k, v := range t.Claims {
+		claims[k] = v
+	}
+	return t, nil
+}
