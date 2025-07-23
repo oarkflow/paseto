@@ -4,7 +4,9 @@ package token
 import (
 	"crypto/cipher"
 	"crypto/ed25519"
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/binary"
@@ -1396,6 +1398,36 @@ func (m *signingMethodXC20P) Verify(signingString string, sig []byte, key interf
 		return ErrInvalidToken
 	}
 	if string(plaintext) != signingString {
+		return ErrInvalidToken
+	}
+	return nil
+}
+
+// SigningMethodHS256 implements HMAC SHA256 signing (JWT standard)
+var SigningMethodHS256 = &signingMethodHS256{}
+
+type signingMethodHS256 struct{}
+
+func (m *signingMethodHS256) Alg() string { return "HS256" }
+func (m *signingMethodHS256) Sign(signingString string, key interface{}) ([]byte, error) {
+	k, ok := key.([]byte)
+	if !ok {
+		return nil, errors.New("invalid HS256 key")
+	}
+	// Use standard HMAC SHA256
+	h := hmac.New(sha256.New, k)
+	h.Write([]byte(signingString))
+	return h.Sum(nil), nil
+}
+func (m *signingMethodHS256) Verify(signingString string, sig []byte, key interface{}) error {
+	k, ok := key.([]byte)
+	if !ok {
+		return errors.New("invalid HS256 key")
+	}
+	h := hmac.New(sha256.New, k)
+	h.Write([]byte(signingString))
+	expected := h.Sum(nil)
+	if !hmac.Equal(expected, sig) {
 		return ErrInvalidToken
 	}
 	return nil
