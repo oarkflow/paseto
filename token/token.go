@@ -113,6 +113,7 @@ type Token struct {
 	ExpiresAt    time.Time
 	Claims       map[string]any    // JSON-serializable claims
 	BinaryClaims map[string][]byte // Efficient binary claims
+	RawClaim     []byte            // Single raw claim payload
 	Footer       map[string]string
 	Blacklisted  bool
 }
@@ -161,6 +162,12 @@ func resetToken(t *Token) {
 	for k := range t.Footer {
 		delete(t.Footer, k)
 	}
+	if len(t.RawClaim) > 0 {
+		for i := range t.RawClaim {
+			t.RawClaim[i] = 0
+		}
+	}
+	t.RawClaim = nil
 	t.ID = ""
 	t.IssuedAt = time.Time{}
 	t.NotBefore = time.Time{}
@@ -173,6 +180,7 @@ const (
 	HeaderVersion = "v"
 	HeaderAlg     = "alg"
 	HeaderKeyID   = "kid"
+	HeaderRawFlag = "raw"
 )
 
 // Algorithm types
@@ -329,6 +337,24 @@ func RegisterBinaryClaim(t *Token, key string, value []byte) error {
 	}
 	// Copy the value to avoid external mutations
 	t.BinaryClaims[key] = append([]byte(nil), value...)
+	return nil
+}
+
+// RegisterByte stores a single raw claim payload without a key.
+func RegisterByte(t *Token, value []byte) error {
+	if t == nil {
+		return errors.New("token is nil")
+	}
+	if len(value) == 0 {
+		t.RawClaim = nil
+		return nil
+	}
+	if cap(t.RawClaim) >= len(value) {
+		t.RawClaim = t.RawClaim[:len(value)]
+		copy(t.RawClaim, value)
+		return nil
+	}
+	t.RawClaim = append([]byte(nil), value...)
 	return nil
 }
 
@@ -568,6 +594,11 @@ func encodeToken(t *Token) (*serializedBuffer, error) {
 	if t.Header == nil || t.Header[HeaderVersion] == "" || t.Header[HeaderAlg] == "" {
 		return nil, ErrInvalidToken
 	}
+	if len(t.RawClaim) > 0 {
+		t.Header[HeaderRawFlag] = "1"
+	} else {
+		delete(t.Header, HeaderRawFlag)
+	}
 
 	// Validate state
 	if IsExpired(t) || IsNotYetValid(t) || t.Blacklisted {
@@ -651,6 +682,12 @@ func encodeToken(t *Token) (*serializedBuffer, error) {
 	}
 	claimKeysPool.Put(bkeys)
 
+	if len(t.RawClaim) > 0 {
+		rlen := len(t.RawClaim)
+		buf = append(buf, byte(rlen>>24), byte(rlen>>16), byte(rlen>>8), byte(rlen))
+		buf = append(buf, t.RawClaim...)
+	}
+
 	// FOOTER: count + sorted key/value
 	fkeys := footerKeysPool.Get().([]string)
 	fkeys = fkeys[:0]
@@ -713,6 +750,7 @@ func decodeToken(data []byte, strict bool) (*Token, error) {
 		(header[HeaderAlg] != AlgEncrypt && header[HeaderAlg] != AlgSign) {
 		return nil, ErrInvalidToken
 	}
+	hasRaw := header[HeaderRawFlag] == "1"
 
 	// ID
 	readID, err := readString(data, &idx)
@@ -781,6 +819,23 @@ func decodeToken(data []byte, strict bool) (*Token, error) {
 		binaryClaims[k] = v
 	}
 
+	var rawClaim []byte
+	if hasRaw {
+		if idx+4 > len(data) {
+			return nil, ErrInvalidToken
+		}
+		rlen := int(data[idx])<<24 | int(data[idx+1])<<16 | int(data[idx+2])<<8 | int(data[idx+3])
+		idx += 4
+		if rlen < 0 || idx+rlen > len(data) {
+			return nil, ErrInvalidToken
+		}
+		if rlen > 0 {
+			rawClaim = make([]byte, rlen)
+			copy(rawClaim, data[idx:idx+rlen])
+		}
+		idx += rlen
+	}
+
 	// FOOTER
 	if idx+2 > len(data) {
 		return nil, ErrInvalidToken
@@ -814,6 +869,7 @@ func decodeToken(data []byte, strict bool) (*Token, error) {
 		ExpiresAt:    time.Unix(0, expiresAt).UTC(),
 		Claims:       claims,
 		BinaryClaims: binaryClaims,
+		RawClaim:     rawClaim,
 		Footer:       footer,
 		Blacklisted:  black,
 	}
@@ -1082,6 +1138,9 @@ func RefreshToken(refreshTokenEncoded string, key []byte, newTTL time.Duration) 
 	}
 	for k, v := range rt.BinaryClaims {
 		newToken.BinaryClaims[k] = append([]byte(nil), v...)
+	}
+	if len(rt.RawClaim) > 0 {
+		newToken.RawClaim = append([]byte(nil), rt.RawClaim...)
 	}
 	for k, v := range rt.Footer {
 		newToken.Footer[k] = v

@@ -4,7 +4,7 @@ go 1.24.2
 
 require golang.org/x/crypto v0.45.0
 
-require gopkg.in/yaml.v3 v3.0.1 // indirect
+require gopkg.in/yaml.v3 v3.0.1
 
 require (
 	github.com/oarkflow/shamir v0.0.1

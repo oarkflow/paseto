@@ -2,6 +2,7 @@
 package token_test
 
 import (
+	"bytes"
 	"crypto/rand"
 	"testing"
 	"time"
@@ -82,5 +83,28 @@ func BenchmarkPasetoDecrypt(b *testing.B) {
 		if decrypted.Err() != nil {
 			b.Fatal(decrypted.Err())
 		}
+	}
+}
+
+func TestRegisterByteRoundTrip(t *testing.T) {
+	key := make([]byte, 32)
+	if _, err := rand.Read(key); err != nil {
+		t.Fatalf("failed to seed key: %v", err)
+	}
+	raw := []byte("opaque-payload")
+	tok := token.CreateToken(time.Minute, token.AlgEncrypt)
+	if err := token.RegisterByte(tok, raw); err != nil {
+		t.Fatalf("RegisterByte failed: %v", err)
+	}
+	encoded, err := token.EncryptToken(tok, key)
+	if err != nil {
+		t.Fatalf("EncryptToken failed: %v", err)
+	}
+	decoded, err := token.DecryptToken(encoded, key)
+	if err != nil {
+		t.Fatalf("DecryptToken failed: %v", err)
+	}
+	if !bytes.Equal(decoded.RawClaim, raw) {
+		t.Fatalf("raw claim mismatch: got %q", decoded.RawClaim)
 	}
 }
