@@ -30,8 +30,8 @@ func init() {
 
 	// Prepare a sample Token for our implementation
 	ourToken = token.CreateToken(time.Minute, token.AlgEncrypt)
-	_ = token.RegisterClaim(ourToken, "user_id", "42")
-	_ = token.RegisterFooter(ourToken, "aud", "internal")
+	_ = ourToken.RegisterClaim("user_id", "42")
+	_ = ourToken.RegisterFooter("aud", "internal")
 
 	// Prepare RegisteredClaims for PASETO
 	now := time.Now()
@@ -93,7 +93,7 @@ func TestRegisterByteRoundTrip(t *testing.T) {
 	}
 	raw := []byte("opaque-payload")
 	tok := token.CreateToken(time.Minute, token.AlgEncrypt)
-	if err := token.RegisterByte(tok, raw); err != nil {
+	if err := tok.RegisterByte(raw); err != nil {
 		t.Fatalf("RegisterByte failed: %v", err)
 	}
 	encoded, err := token.EncryptToken(tok, key)

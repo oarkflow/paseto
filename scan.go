@@ -19,7 +19,7 @@ func (t *Token) Err() error { return t.err }
 
 // Scan deserialize claims to claims object and footer to footer object
 // Performs claims validation (or user-provided in case of wrapping) under the hood for safer defaults.
-func (t *Token) Scan(claims Claims, footer interface{}) error {
+func (t *Token) Scan(claims Claims, footer any) error {
 	return t.scan(claims, footer)
 }
 
@@ -29,7 +29,7 @@ func (t *Token) ScanClaims(claims Claims) error {
 	return t.scan(claims, nil)
 }
 
-func (t *Token) scan(claims Claims, footer interface{}) error {
+func (t *Token) scan(claims Claims, footer any) error {
 	if t.err != nil {
 		return t.err
 	}

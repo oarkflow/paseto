@@ -76,9 +76,9 @@ func symmetricTest() {
 	_, _ = rand.Read(key)
 
 	t := token.CreateToken(10*time.Minute, token.AlgEncrypt)
-	_ = token.RegisterClaim(t, "u", "42")
+	_ = t.RegisterClaim("u", "42")
 
-	encrypted, err := token.EncryptToken(t, key)
+	encrypted, err := t.EncryptToken(key)
 	if err != nil {
 		log.Fatal("encrypt failed:", err)
 	}
@@ -100,10 +100,10 @@ func asymmetricTest() {
 	}
 
 	t := token.CreateToken(1*time.Hour, token.AlgSign, "key-123")
-	_ = token.RegisterClaim(t, "role", "admin")
-	_ = token.RegisterFooter(t, "kid", "key-123")
+	_ = t.RegisterClaim("role", "admin")
+	_ = t.RegisterFooter("kid", "key-123")
 
-	signed, err := token.SignToken(t, priv, "key-123")
+	signed, err := t.SignToken(priv, "key-123")
 	if err != nil {
 		log.Fatal("signing failed:", err)
 	}
@@ -127,16 +127,16 @@ func asymmetricTest() {
 func claimOperationsTest() {
 	fmt.Println("=== Claim Operations Test ===")
 	t := token.CreateToken(30*time.Minute, token.AlgEncrypt)
-	_ = token.RegisterClaim(t, "email", "alice@example.com")
-	_ = token.RegisterClaim(t, "scope", "read:all")
-	_ = token.RegisterFooter(t, "purpose", "test")
+	_ = t.RegisterClaim("email", "alice@example.com")
+	_ = t.RegisterClaim("scope", "read:all")
+	_ = t.RegisterFooter("purpose", "test")
 
-	token.ScanClaims(t, func(k string, v any) bool {
+	t.ScanClaims(func(k string, v any) bool {
 		fmt.Printf("Claim: %s = %v\n", k, v)
 		return true
 	})
 
-	fmt.Println("Blacklisted?", token.IsBlacklisted(t))
+	fmt.Println("Blacklisted?", t.IsBlacklisted())
 	fmt.Println()
 }
 
@@ -164,9 +164,9 @@ func refreshTokenTest() {
 	_, _ = rand.Read(key)
 
 	rt := token.CreateRefreshToken(24 * time.Hour)
-	_ = token.RegisterClaim(rt, "user_id", "42")
+	_ = rt.RegisterClaim("user_id", "42")
 
-	encryptedRT, err := token.EncryptToken(rt, key)
+	encryptedRT, err := rt.EncryptToken(key)
 	if err != nil {
 		log.Fatal("refresh encrypt failed:", err)
 	}
@@ -192,7 +192,7 @@ func revocationTest() {
 	_, _ = rand.Read(key)
 
 	t := token.CreateToken(5*time.Minute, token.AlgEncrypt)
-	_ = token.RegisterClaim(t, "user", "bob")
+	_ = t.RegisterClaim("user", "bob")
 
 	encrypted, err := token.EncryptToken(t, key)
 	if err != nil {
@@ -217,7 +217,7 @@ func revokeByStringTest() {
 	_, _ = rand.Read(key)
 
 	t := token.CreateToken(5*time.Minute, token.AlgEncrypt)
-	_ = token.RegisterClaim(t, "user", "charlie")
+	_ = t.RegisterClaim("user", "charlie")
 
 	encrypted, err := token.EncryptToken(t, key)
 	if err != nil {
@@ -246,7 +246,7 @@ func checkRevokedStringTest() {
 	_, _ = rand.Read(key)
 
 	t := token.CreateToken(5*time.Minute, token.AlgEncrypt)
-	_ = token.RegisterClaim(t, "user", "dave")
+	_ = t.RegisterClaim("user", "dave")
 
 	encrypted, err := token.EncryptToken(t, key)
 	if err != nil {
@@ -268,7 +268,7 @@ func checkRevokedStringTest() {
 	fmt.Println("Revoked after RevokeID?", revoked)
 
 	t2 := token.CreateToken(5*time.Minute, token.AlgEncrypt)
-	_ = token.RegisterClaim(t2, "user", "eve")
+	_ = t2.RegisterClaim("user", "eve")
 	encrypted2, _ := token.EncryptToken(t2, key)
 
 	revoked2, _ := token.IsRevokedToken(encrypted2, key)
@@ -325,7 +325,7 @@ func shamirSSSTest() {
 
 	// 5) Use recovered as encryption key to encrypt a token.
 	t := token.CreateToken(10*time.Minute, token.AlgEncrypt)
-	_ = token.RegisterClaim(t, "user_id", "1001")
+	_ = t.RegisterClaim("user_id", "1001")
 
 	encrypted, err := token.EncryptToken(t, recovered)
 	if err != nil {
@@ -360,7 +360,7 @@ func rotateSecretWithKMTest() {
 
 	// 3) Encrypt a token using KeyManager helper (EncryptWithKM) so header["kid"]=initialKeyID.
 	t := token.CreateToken(1*time.Minute, token.AlgEncrypt)
-	_ = token.RegisterClaim(t, "session", "abc123")
+	_ = t.RegisterClaim("session", "abc123")
 
 	encrypted, err := token.EncryptWithKM(km, t)
 	if err != nil {
@@ -384,7 +384,7 @@ func rotateSecretWithKMTest() {
 
 	// 7) Encrypt a fresh token under the new key.
 	t2 := token.CreateToken(1*time.Minute, token.AlgEncrypt)
-	_ = token.RegisterClaim(t2, "session", "def456")
+	_ = t2.RegisterClaim("session", "def456")
 
 	encrypted2, err := token.EncryptWithKM(km, t2)
 	if err != nil {
@@ -426,7 +426,7 @@ func jwtCompatibleExample() {
 	t := token.NewWithClaims(token.SigningMethodEdDSA, claims)
 
 	// Serialize and sign
-	payload, err := token.SerializeToken(t)
+	payload, err := t.SerializeToken()
 	if err != nil {
 		log.Fatal("serialize failed:", err)
 	}
@@ -479,7 +479,7 @@ func secretGeneratorTest() {
 
 	// 4) Use the symmetric key to encrypt a token.
 	t := token.CreateToken(10*time.Minute, token.AlgEncrypt)
-	_ = token.RegisterClaim(t, "user_id", "12345")
+	_ = t.RegisterClaim("user_id", "12345")
 
 	encrypted, err := token.EncryptToken(t, symKey)
 	if err != nil {
@@ -496,8 +496,7 @@ func secretGeneratorTest() {
 
 	// 6) Use the signing keypair to sign a token.
 	t2 := token.CreateToken(1*time.Hour, token.AlgSign)
-	_ = token.RegisterClaim(t2, "role", "user")
-
+	_ = t2.RegisterClaim("role", "user")
 	signed, err := token.SignToken(t2, priv)
 	if err != nil {
 		log.Fatal("SignToken failed:", err)
@@ -528,18 +527,18 @@ func binaryClaimsTest() {
 
 	// Create a token with both regular and binary claims
 	t := token.CreateToken(10*time.Minute, token.AlgEncrypt)
-	_ = token.RegisterClaim(t, "user_id", "12345")
-	_ = token.RegisterClaim(t, "role", "admin")
+	_ = t.RegisterClaim("user_id", "12345")
+	_ = t.RegisterClaim("role", "admin")
 
 	// Add binary data (e.g., a cryptographic signature or encrypted payload)
 	binaryData := make([]byte, 64)
 	_, _ = rand.Read(binaryData)
-	_ = token.RegisterBinaryClaim(t, "signature", binaryData)
+	_ = t.RegisterBinaryClaim("signature", binaryData)
 
 	// Another binary claim
 	sessionKey := make([]byte, 32)
 	_, _ = rand.Read(sessionKey)
-	_ = token.RegisterBinaryClaim(t, "session_key", sessionKey)
+	_ = t.RegisterBinaryClaim("session_key", sessionKey)
 
 	fmt.Printf("Binary claim 'signature' length: %d bytes\n", len(binaryData))
 	fmt.Printf("Binary claim 'session_key' length: %d bytes\n", len(sessionKey))
@@ -558,7 +557,7 @@ func binaryClaimsTest() {
 	}
 	fmt.Println("Decrypted regular claims:", decrypted.Claims)
 
-	sig, ok := token.GetBinaryClaim(decrypted, "signature")
+	sig, ok := decrypted.GetBinaryClaim("signature")
 	if !ok {
 		log.Fatal("Binary claim 'signature' not found")
 	}
@@ -567,7 +566,7 @@ func binaryClaimsTest() {
 	}
 	fmt.Println("Binary claim 'signature' verified")
 
-	sessKey, ok := token.GetBinaryClaim(decrypted, "session_key")
+	sessKey, ok := decrypted.GetBinaryClaim("session_key")
 	if !ok {
 		log.Fatal("Binary claim 'session_key' not found")
 	}

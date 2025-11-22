@@ -10,7 +10,7 @@ import (
 )
 
 // encode performs json.Marshalling for claims and serialize footer interface (not necessary JSON) to byte slice if it is present.
-func encode(claims Claims, footerObj interface{}) ([]byte, []byte, error) {
+func encode(claims Claims, footerObj any) ([]byte, []byte, error) {
 	var (
 		payload []byte
 		err     error
@@ -68,7 +68,7 @@ func decodeB64ToRawBinary(token string, headerLen int) (message, footer []byte, 
 	return message, footer, nil
 }
 
-func encodeFooter(i interface{}) ([]byte, error) {
+func encodeFooter(i any) ([]byte, error) {
 	switch v := i.(type) {
 	case nil:
 		return []byte(""), nil
@@ -88,7 +88,7 @@ func encodeFooter(i interface{}) ([]byte, error) {
 	return json.Marshal(i)
 }
 
-func decodeFooter(data []byte, i interface{}) error {
+func decodeFooter(data []byte, i any) error {
 	switch f := i.(type) {
 	case *string:
 		*f = string(data)

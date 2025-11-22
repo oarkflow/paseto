@@ -547,13 +547,13 @@ func replaceInJSONFile(filePath, key, value string) error {
 		return fmt.Errorf("failed to read file: %w", err)
 	}
 
-	var data map[string]interface{}
+	var data map[string]any
 	if len(content) > 0 {
 		if err := json.Unmarshal(content, &data); err != nil {
 			return fmt.Errorf("failed to parse JSON: %w", err)
 		}
 	} else {
-		data = make(map[string]interface{})
+		data = make(map[string]any)
 	}
 
 	data[key] = value
@@ -573,13 +573,13 @@ func replaceInYAMLFile(filePath, key, value string) error {
 		return fmt.Errorf("failed to read file: %w", err)
 	}
 
-	var data map[string]interface{}
+	var data map[string]any
 	if len(content) > 0 {
 		if err := yaml.Unmarshal(content, &data); err != nil {
 			return fmt.Errorf("failed to parse YAML: %w", err)
 		}
 	} else {
-		data = make(map[string]interface{})
+		data = make(map[string]any)
 	}
 
 	data[key] = value

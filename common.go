@@ -78,7 +78,7 @@ func (k *SymKey) isValidFor(v Version, p purpose) bool {
 
 // optional includes optional arguments which is non-mandatory to PASETO.
 type optional struct {
-	footer    interface{}
+	footer    any
 	assertion []byte
 }
 
@@ -86,7 +86,7 @@ type optional struct {
 type ProvidedOption func(*optional) error
 
 // WithFooter adds PASETO footer to the token.
-func WithFooter(footer interface{}) ProvidedOption {
+func WithFooter(footer any) ProvidedOption {
 	return func(o *optional) error {
 		if footer == nil {
 			return errors.New("nil footer was passed to WithFooter function")
