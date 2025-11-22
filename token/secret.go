@@ -24,7 +24,7 @@ const (
 	defaultPoolSize         = 256
 	maxPoolSize             = 4096
 	defaultCharsetLen       = 64
-	extendedCharsetLen      = 67   // 64 + 3 symbols (., $, /)
+	extendedCharsetLen      = 68   // 64 + 4 symbols (., $, /, +)
 	charsetMask64      byte = 0x3F // 0b00111111 - masks to 64 values
 	charsetMask128     byte = 0x7F // 0b01111111 - masks to 128 values
 )
@@ -44,13 +44,13 @@ var charset = [defaultCharsetLen]byte{
 	'0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '-', '_',
 }
 
-// extendedCharset includes additional symbols: . $ /
+// extendedCharset includes additional symbols: . $ / +
 var extendedCharset = [extendedCharsetLen]byte{
 	'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M',
 	'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z',
 	'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm',
 	'n', 'o', 'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z',
-	'0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '-', '_', '.', '$', '/',
+	'0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '-', '_', '.', '$', '/', '+',
 }
 
 // SecretGenerator produces cryptographically secure secrets with zero allocations
@@ -303,8 +303,8 @@ func (g *SecretGenerator) StringUnbiased(length int) (string, error) {
 }
 
 // StringWithSymbols returns a secret string using the extended character set
-// that includes . $ / symbols in addition to the standard URL-safe characters.
-// The first character is guaranteed to not be a symbol (., $, /).
+// that includes . $ / + symbols in addition to the standard URL-safe characters.
+// The first character is guaranteed to not be a symbol (., $, /, +).
 func (g *SecretGenerator) StringWithSymbols(length int) (string, error) {
 	if length <= 0 {
 		return "", ErrInvalidLength
