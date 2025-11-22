@@ -106,19 +106,66 @@ func SetRevocationStore(store RevocationStore) {
 
 // Token represents the core token data with enhanced security features
 type Token struct {
-	Header      map[string]string // Metadata: version, alg, kid, etc.
-	ID          string            // unique identifier (jti)
-	IssuedAt    time.Time
-	NotBefore   time.Time // nbf
-	ExpiresAt   time.Time
-	Claims      map[string]any
-	Footer      map[string]string
-	Blacklisted bool
+	Header       map[string]string // Metadata: version, alg, kid, etc.
+	ID           string            // unique identifier (jti)
+	IssuedAt     time.Time
+	NotBefore    time.Time // nbf
+	ExpiresAt    time.Time
+	Claims       map[string]any    // JSON-serializable claims
+	BinaryClaims map[string][]byte // Efficient binary claims
+	Footer       map[string]string
+	Blacklisted  bool
 }
 
 type SignedToken struct {
 	Payload   []byte
 	Signature []byte
+}
+
+// tokenPool reuses Token structs to avoid repeated allocations inside generators.
+var tokenPool = sync.Pool{
+	New: func() any {
+		return &Token{
+			Header:       make(map[string]string, 4),
+			Claims:       make(map[string]any, 8),
+			BinaryClaims: make(map[string][]byte, 4),
+			Footer:       make(map[string]string, 4),
+		}
+	},
+}
+
+func acquireToken() *Token {
+	t := tokenPool.Get().(*Token)
+	resetToken(t)
+	return t
+}
+
+func releaseToken(t *Token) {
+	if t == nil {
+		return
+	}
+	resetToken(t)
+	tokenPool.Put(t)
+}
+
+func resetToken(t *Token) {
+	for k := range t.Header {
+		delete(t.Header, k)
+	}
+	for k := range t.Claims {
+		delete(t.Claims, k)
+	}
+	for k := range t.BinaryClaims {
+		delete(t.BinaryClaims, k)
+	}
+	for k := range t.Footer {
+		delete(t.Footer, k)
+	}
+	t.ID = ""
+	t.IssuedAt = time.Time{}
+	t.NotBefore = time.Time{}
+	t.ExpiresAt = time.Time{}
+	t.Blacklisted = false
 }
 
 // Header constants
@@ -142,6 +189,12 @@ func ValidateKey(key []byte) error {
 	return nil
 }
 
+func generateTokenID() string {
+	idBytes := make([]byte, 16)
+	_, _ = io.ReadFull(rand.Reader, idBytes)
+	return base64.RawURLEncoding.EncodeToString(idBytes)
+}
+
 // CreateToken issues a new token with security headers
 func CreateToken(ttl time.Duration, alg string, ids ...string) *Token {
 	var keyID string
@@ -149,9 +202,7 @@ func CreateToken(ttl time.Duration, alg string, ids ...string) *Token {
 		keyID = strings.TrimSpace(ids[0])
 	}
 	now := time.Now().UTC()
-	idBytes := make([]byte, 16)
-	_, _ = io.ReadFull(rand.Reader, idBytes)
-	id := base64.RawURLEncoding.EncodeToString(idBytes)
+	id := generateTokenID()
 
 	header := map[string]string{
 		HeaderVersion: "1",
@@ -262,6 +313,57 @@ func GetClaim(t *Token, key string) (any, bool) {
 		return nil, false
 	}
 	val, ok := t.Claims[key]
+	return val, ok
+}
+
+// RegisterBinaryClaim adds or updates a binary claim key→value.
+func RegisterBinaryClaim(t *Token, key string, value []byte) error {
+	if t == nil {
+		return errors.New("token is nil")
+	}
+	if key == "" {
+		return errors.New("binary claim key required")
+	}
+	if t.BinaryClaims == nil {
+		t.BinaryClaims = make(map[string][]byte)
+	}
+	// Copy the value to avoid external mutations
+	t.BinaryClaims[key] = append([]byte(nil), value...)
+	return nil
+}
+
+// RegisterBinaryClaims adds multiple binary claims at once.
+func RegisterBinaryClaims(t *Token, claims map[string][]byte) error {
+	if t == nil {
+		return errors.New("token is nil")
+	}
+	if t.BinaryClaims == nil {
+		t.BinaryClaims = make(map[string][]byte)
+	}
+	for k, v := range claims {
+		if k == "" {
+			return errors.New("binary claim key required")
+		}
+		t.BinaryClaims[k] = append([]byte(nil), v...)
+	}
+	return nil
+}
+
+// RemoveBinaryClaim deletes a binary claim by key.
+func RemoveBinaryClaim(t *Token, key string) error {
+	if t == nil {
+		return errors.New("token is nil")
+	}
+	delete(t.BinaryClaims, key)
+	return nil
+}
+
+// GetBinaryClaim returns the value for a binary claim, and a boolean indicating presence.
+func GetBinaryClaim(t *Token, key string) ([]byte, bool) {
+	if t == nil || t.BinaryClaims == nil {
+		return nil, false
+	}
+	val, ok := t.BinaryClaims[key]
 	return val, ok
 }
 
@@ -422,8 +524,44 @@ var noncePool = sync.Pool{
 	},
 }
 
+type serializedBuffer struct {
+	ptr *[]byte
+	buf []byte
+}
+
+func (s *serializedBuffer) Bytes() []byte { return s.buf }
+
+// Detach hands ownership of the underlying slice to the caller without returning it to the pool.
+func (s *serializedBuffer) Detach() []byte {
+	buf := s.buf
+	s.ptr = nil
+	return buf
+}
+
+// Release zeros sensitive material and returns the buffer to the pool.
+func (s *serializedBuffer) Release() {
+	if s == nil || s.ptr == nil {
+		return
+	}
+	buf := s.buf
+	for i := range buf {
+		buf[i] = 0
+	}
+	*s.ptr = buf[:0]
+	bytePool.Put(s.ptr)
+	s.ptr = nil
+}
+
 // SerializeToken manually encodes the Token into a byte slice
 func SerializeToken(t *Token) ([]byte, error) {
+	sb, err := encodeToken(t)
+	if err != nil {
+		return nil, err
+	}
+	return sb.Detach(), nil
+}
+
+func encodeToken(t *Token) (*serializedBuffer, error) {
 	if t == nil {
 		return nil, ErrInvalidToken
 	}
@@ -485,14 +623,33 @@ func SerializeToken(t *Token) ([]byte, error) {
 		v := t.Claims[k]
 		jsonVal, err := json.Marshal(v)
 		if err != nil {
-			bytePool.Put(ptr)
 			claimKeysPool.Put(keys)
+			bytePool.Put(ptr)
 			return nil, ErrInvalidToken
 		}
 		appendString(&buf, k)
 		appendString(&buf, string(jsonVal))
 	}
 	claimKeysPool.Put(keys)
+
+	// BINARY CLAIMS: count + sorted key/value, stored as binary
+	bkeys := claimKeysPool.Get().([]string)
+	bkeys = bkeys[:0]
+	for k := range t.BinaryClaims {
+		bkeys = append(bkeys, k)
+	}
+	sort.Strings(bkeys)
+	bcount := len(bkeys)
+	buf = append(buf, byte(bcount>>8), byte(bcount))
+	for _, k := range bkeys {
+		v := t.BinaryClaims[k]
+		appendString(&buf, k)
+		// Store binary value with length prefix
+		vlen := len(v)
+		buf = append(buf, byte(vlen>>24), byte(vlen>>16), byte(vlen>>8), byte(vlen))
+		buf = append(buf, v...)
+	}
+	claimKeysPool.Put(bkeys)
 
 	// FOOTER: count + sorted key/value
 	fkeys := footerKeysPool.Get().([]string)
@@ -518,11 +675,15 @@ func SerializeToken(t *Token) ([]byte, error) {
 	}
 
 	*ptr = buf
-	return buf, nil
+	return &serializedBuffer{ptr: ptr, buf: buf}, nil
 }
 
 // deserializeToken manually decodes a byte slice into a Token struct
 func deserializeToken(data []byte) (*Token, error) {
+	return decodeToken(data, true)
+}
+
+func decodeToken(data []byte, strict bool) (*Token, error) {
 	if len(data) == 0 {
 		return nil, ErrInvalidToken
 	}
@@ -593,6 +754,33 @@ func deserializeToken(data []byte) (*Token, error) {
 		claims[k] = val
 	}
 
+	// BINARY CLAIMS
+	if idx+2 > len(data) {
+		return nil, ErrInvalidToken
+	}
+	bcount := int(data[idx])<<8 | int(data[idx+1])
+	idx += 2
+	binaryClaims := make(map[string][]byte, bcount)
+	for i := 0; i < bcount; i++ {
+		k, err := readString(data, &idx)
+		if err != nil {
+			return nil, ErrInvalidToken
+		}
+		// Read binary value with 4-byte length prefix
+		if idx+4 > len(data) {
+			return nil, ErrInvalidToken
+		}
+		vlen := int(data[idx])<<24 | int(data[idx+1])<<16 | int(data[idx+2])<<8 | int(data[idx+3])
+		idx += 4
+		if idx+vlen > len(data) {
+			return nil, ErrInvalidToken
+		}
+		v := make([]byte, vlen)
+		copy(v, data[idx:idx+vlen])
+		idx += vlen
+		binaryClaims[k] = v
+	}
+
 	// FOOTER
 	if idx+2 > len(data) {
 		return nil, ErrInvalidToken
@@ -619,25 +807,32 @@ func deserializeToken(data []byte) (*Token, error) {
 	black := data[idx] == 1
 
 	t := &Token{
-		Header:      header,
-		ID:          readID,
-		IssuedAt:    time.Unix(0, issuedAt).UTC(),
-		NotBefore:   time.Unix(0, notBefore).UTC(),
-		ExpiresAt:   time.Unix(0, expiresAt).UTC(),
-		Claims:      claims,
-		Footer:      footer,
-		Blacklisted: black,
+		Header:       header,
+		ID:           readID,
+		IssuedAt:     time.Unix(0, issuedAt).UTC(),
+		NotBefore:    time.Unix(0, notBefore).UTC(),
+		ExpiresAt:    time.Unix(0, expiresAt).UTC(),
+		Claims:       claims,
+		BinaryClaims: binaryClaims,
+		Footer:       footer,
+		Blacklisted:  black,
 	}
 
-	// Validate state
-	if IsExpired(t) || IsNotYetValid(t) || t.Blacklisted {
-		return nil, ErrInvalidToken
-	}
-	if revoked, err := IsRevokedID(t.ID); err != nil || revoked {
-		return nil, ErrInvalidToken
+	if strict {
+		if IsExpired(t) || IsNotYetValid(t) || t.Blacklisted {
+			return nil, ErrInvalidToken
+		}
+		if revoked, err := IsRevokedID(t.ID); err != nil || revoked {
+			return nil, ErrInvalidToken
+		}
 	}
 
 	return t, nil
+}
+
+// deserializeTokenRaw decodes without enforcing staleness/blacklist checks.
+func deserializeTokenRaw(data []byte) (*Token, error) {
+	return decodeToken(data, false)
 }
 
 //  AEAD POOL FOR EFFICIENT XChaCha20‐POLY1305
@@ -775,11 +970,12 @@ func EncryptToken(t *Token, key []byte, ids ...string) (string, error) {
 		t.Header[HeaderKeyID] = keyID
 	}
 
-	plain, err := SerializeToken(t)
+	sb, err := encodeToken(t)
 	if err != nil {
 		return "", ErrInvalidToken
 	}
-	cipher, err := Encrypt(key, plain)
+	defer sb.Release()
+	cipher, err := Encrypt(key, sb.Bytes())
 	if err != nil {
 		return "", ErrInvalidToken
 	}
@@ -816,10 +1012,11 @@ func SignToken(t *Token, priv ed25519.PrivateKey, ids ...string) (*SignedToken, 
 		t.Header[HeaderKeyID] = keyID
 	}
 
-	payload, err := SerializeToken(t)
+	sb, err := encodeToken(t)
 	if err != nil {
 		return nil, ErrInvalidToken
 	}
+	payload := sb.Detach()
 	sig := ed25519.Sign(priv, payload)
 	return &SignedToken{Payload: payload, Signature: sig}, nil
 }
@@ -883,6 +1080,9 @@ func RefreshToken(refreshTokenEncoded string, key []byte, newTTL time.Duration) 
 	for k, v := range rt.Claims {
 		newToken.Claims[k] = v
 	}
+	for k, v := range rt.BinaryClaims {
+		newToken.BinaryClaims[k] = append([]byte(nil), v...)
+	}
 	for k, v := range rt.Footer {
 		newToken.Footer[k] = v
 	}
@@ -895,6 +1095,7 @@ func RefreshToken(refreshTokenEncoded string, key []byte, newTTL time.Duration) 
 func DeterministicToken(
 	now time.Time,
 	claims map[string]any,
+	binaryClaims map[string][]byte,
 	footer map[string]string,
 	ttl time.Duration,
 	ids ...string,
@@ -903,22 +1104,21 @@ func DeterministicToken(
 	if len(ids) > 0 && ids[0] != "" {
 		keyID = strings.TrimSpace(ids[0])
 	}
-	idBytes := make([]byte, 16)
-	_, _ = io.ReadFull(rand.Reader, idBytes)
-	id := base64.RawURLEncoding.EncodeToString(idBytes)
+	id := generateTokenID()
 	return &Token{
 		Header: map[string]string{
 			HeaderVersion: "1",
 			HeaderAlg:     AlgEncrypt,
 			HeaderKeyID:   keyID,
 		},
-		ID:          id,
-		IssuedAt:    now,
-		NotBefore:   now,
-		ExpiresAt:   now.Add(ttl),
-		Claims:      copyClaims(claims),
-		Footer:      copyFooter(footer),
-		Blacklisted: false,
+		ID:           id,
+		IssuedAt:     now,
+		NotBefore:    now,
+		ExpiresAt:    now.Add(ttl),
+		Claims:       copyClaims(claims),
+		BinaryClaims: copyBinaryClaims(binaryClaims),
+		Footer:       copyFooter(footer),
+		Blacklisted:  false,
 	}
 }
 
@@ -930,12 +1130,267 @@ func copyClaims(src map[string]any) map[string]any {
 	return dst
 }
 
+func copyBinaryClaims(src map[string][]byte) map[string][]byte {
+	dst := make(map[string][]byte, len(src))
+	for k, v := range src {
+		dst[k] = append([]byte(nil), v...)
+	}
+	return dst
+}
+
 func copyFooter(src map[string]string) map[string]string {
 	dst := make(map[string]string, len(src))
 	for k, v := range src {
 		dst[k] = v
 	}
 	return dst
+}
+
+func mergeClaims(dst map[string]any, src map[string]any) {
+	if len(src) == 0 || dst == nil {
+		return
+	}
+	for k, v := range src {
+		if k == "" {
+			continue
+		}
+		dst[k] = v
+	}
+}
+
+func mergeBinaryClaims(dst map[string][]byte, src map[string][]byte) {
+	if len(src) == 0 || dst == nil {
+		return
+	}
+	for k, v := range src {
+		if k == "" {
+			continue
+		}
+		dst[k] = append([]byte(nil), v...)
+	}
+}
+
+func mergeFooter(dst map[string]string, src map[string]string) {
+	if len(src) == 0 || dst == nil {
+		return
+	}
+	for k, v := range src {
+		if k == "" {
+			continue
+		}
+		dst[k] = v
+	}
+}
+
+// TokenGenerator issues encrypted or signed tokens while reusing pooled Token structs.
+type TokenGenerator struct {
+	ttl          time.Duration
+	nowFn        func() time.Time
+	symmetricKey []byte
+	signingKey   ed25519.PrivateKey
+	keyID        string
+	km           *KeyManager
+}
+
+// GeneratorOption customizes a TokenGenerator.
+type GeneratorOption func(*TokenGenerator)
+
+// WithGeneratorKeyID forces a static key identifier on generated tokens.
+func WithGeneratorKeyID(keyID string) GeneratorOption {
+	return func(g *TokenGenerator) {
+		g.keyID = strings.TrimSpace(keyID)
+	}
+}
+
+// WithGeneratorNow injects a deterministic clock source (useful for tests).
+func WithGeneratorNow(fn func() time.Time) GeneratorOption {
+	return func(g *TokenGenerator) {
+		if fn != nil {
+			g.nowFn = fn
+		}
+	}
+}
+
+func defaultNow() time.Time { return time.Now().UTC() }
+
+func (g *TokenGenerator) applyOptions(opts ...GeneratorOption) {
+	for _, opt := range opts {
+		if opt != nil {
+			opt(g)
+		}
+	}
+	if g.nowFn == nil {
+		g.nowFn = defaultNow
+	}
+}
+
+// NewSymmetricGenerator builds an encrypting generator using a static key.
+func NewSymmetricGenerator(key []byte, ttl time.Duration, opts ...GeneratorOption) (*TokenGenerator, error) {
+	if err := ValidateKey(key); err != nil {
+		return nil, err
+	}
+	g := &TokenGenerator{
+		ttl:          ttl,
+		symmetricKey: append([]byte(nil), key...),
+	}
+	g.applyOptions(opts...)
+	return g, nil
+}
+
+// NewKeyManagerGenerator encrypts tokens using rotating keys from a KeyManager.
+func NewKeyManagerGenerator(km *KeyManager, ttl time.Duration, opts ...GeneratorOption) (*TokenGenerator, error) {
+	if km == nil {
+		return nil, errors.New("key manager is nil")
+	}
+	g := &TokenGenerator{ttl: ttl, km: km}
+	g.applyOptions(opts...)
+	return g, nil
+}
+
+// NewSigningGenerator signs tokens with Ed25519 keys.
+func NewSigningGenerator(priv ed25519.PrivateKey, ttl time.Duration, opts ...GeneratorOption) (*TokenGenerator, error) {
+	if l := len(priv); l != ed25519.PrivateKeySize {
+		return nil, fmt.Errorf("invalid Ed25519 private key size: %d", len(priv))
+	}
+	g := &TokenGenerator{
+		ttl:        ttl,
+		signingKey: append(ed25519.PrivateKey(nil), priv...),
+	}
+	g.applyOptions(opts...)
+	return g, nil
+}
+
+// Generate produces a fully encoded token string (encrypted or signed).
+func (g *TokenGenerator) Generate(claims map[string]any, binaryClaims map[string][]byte, footer map[string]string, ttlOverride ...time.Duration) (string, error) {
+	if g == nil {
+		return "", errors.New("token generator is nil")
+	}
+	ttl := g.ttl
+	if len(ttlOverride) > 0 && ttlOverride[0] > 0 {
+		ttl = ttlOverride[0]
+	}
+	if ttl <= 0 {
+		return "", errors.New("token TTL must be positive")
+	}
+	alg, kid, keyBytes, err := g.resolveKey()
+	if err != nil {
+		return "", err
+	}
+	t := acquireToken()
+	defer releaseToken(t)
+	now := g.nowFn()
+	t.Header[HeaderVersion] = "1"
+	t.Header[HeaderAlg] = alg
+	if kid != "" {
+		t.Header[HeaderKeyID] = kid
+	}
+	t.ID = generateTokenID()
+	t.IssuedAt = now
+	t.NotBefore = now
+	t.ExpiresAt = now.Add(ttl)
+	mergeClaims(t.Claims, claims)
+	mergeBinaryClaims(t.BinaryClaims, binaryClaims)
+	mergeFooter(t.Footer, footer)
+	if alg == AlgEncrypt {
+		return g.encryptWithKey(keyBytes, t)
+	}
+	return g.signToken(t)
+}
+
+func (g *TokenGenerator) resolveKey() (string, string, []byte, error) {
+	switch {
+	case g == nil:
+		return "", "", nil, errors.New("token generator is nil")
+	case g.signingKey != nil:
+		return AlgSign, g.keyID, g.signingKey, nil
+	case g.km != nil:
+		kid, key := g.km.GetCurrentKey()
+		if kid == "" || len(key) == 0 {
+			return "", "", nil, errors.New("no active key available")
+		}
+		return AlgEncrypt, kid, key, nil
+	case len(g.symmetricKey) > 0:
+		return AlgEncrypt, g.keyID, g.symmetricKey, nil
+	default:
+		return "", "", nil, errors.New("generator missing key material")
+	}
+}
+
+func (g *TokenGenerator) encryptWithKey(key []byte, t *Token) (string, error) {
+	if err := ValidateKey(key); err != nil {
+		return "", err
+	}
+	sb, err := encodeToken(t)
+	if err != nil {
+		return "", ErrInvalidToken
+	}
+	defer sb.Release()
+	cipher, err := Encrypt(key, sb.Bytes())
+	if err != nil {
+		return "", ErrInvalidToken
+	}
+	return EncodeBase64URL(cipher), nil
+}
+
+func (g *TokenGenerator) signToken(t *Token) (string, error) {
+	sb, err := encodeToken(t)
+	if err != nil {
+		return "", ErrInvalidToken
+	}
+	payload := sb.Detach()
+	sig := ed25519.Sign(g.signingKey, payload)
+	return EncodeBase64URL(payload) + "." + EncodeBase64URL(sig), nil
+}
+
+// TokenVerifier rapidly validates encrypted or signed tokens.
+type TokenVerifier struct {
+	symmetricKey []byte
+	publicKey    ed25519.PublicKey
+	km           *KeyManager
+}
+
+// NewSymmetricVerifier verifies XC20P tokens with a static key.
+func NewSymmetricVerifier(key []byte) (*TokenVerifier, error) {
+	if err := ValidateKey(key); err != nil {
+		return nil, err
+	}
+	return &TokenVerifier{symmetricKey: append([]byte(nil), key...)}, nil
+}
+
+// NewKeyManagerVerifier resolves keys through a shared KeyManager.
+func NewKeyManagerVerifier(km *KeyManager) (*TokenVerifier, error) {
+	if km == nil {
+		return nil, errors.New("key manager is nil")
+	}
+	return &TokenVerifier{km: km}, nil
+}
+
+// NewSigningVerifier verifies Ed25519 signed tokens.
+func NewSigningVerifier(pub ed25519.PublicKey) (*TokenVerifier, error) {
+	if len(pub) != ed25519.PublicKeySize {
+		return nil, fmt.Errorf("invalid Ed25519 public key size: %d", len(pub))
+	}
+	return &TokenVerifier{publicKey: append(ed25519.PublicKey(nil), pub...)}, nil
+}
+
+// Verify checks the supplied encoded token and returns its parsed representation.
+func (v *TokenVerifier) Verify(encoded string) (*Token, error) {
+	switch {
+	case v == nil:
+		return nil, errors.New("token verifier is nil")
+	case v.km != nil:
+		return DecryptWithKM(v.km, encoded)
+	case len(v.symmetricKey) > 0:
+		return DecryptToken(encoded, v.symmetricKey)
+	case len(v.publicKey) > 0:
+		st, err := DecodeSignedToken(encoded)
+		if err != nil {
+			return nil, ErrInvalidToken
+		}
+		return VerifyToken(st, v.publicKey)
+	default:
+		return nil, errors.New("verifier missing key material")
+	}
 }
 
 // RevokeToken revokes a token given its encrypted string
@@ -976,109 +1431,6 @@ func parseTokenRaw(encoded string, key []byte) (*Token, error) {
 		return nil, ErrInvalidToken
 	}
 	return deserializeTokenRaw(plain)
-}
-
-func deserializeTokenRaw(data []byte) (*Token, error) {
-	if len(data) == 0 {
-		return nil, ErrInvalidToken
-	}
-	idx := 0
-
-	// HEADER
-	if idx+2 > len(data) {
-		return nil, ErrInvalidToken
-	}
-	hcount := int(data[idx])<<8 | int(data[idx+1])
-	idx += 2
-	header := make(map[string]string, hcount)
-	for i := 0; i < hcount; i++ {
-		k, err := readString(data, &idx)
-		if err != nil {
-			return nil, ErrInvalidToken
-		}
-		v, err := readString(data, &idx)
-		if err != nil {
-			return nil, ErrInvalidToken
-		}
-		header[k] = v
-	}
-
-	// ID
-	readID, err := readString(data, &idx)
-	if err != nil {
-		return nil, ErrInvalidToken
-	}
-
-	// Times
-	if idx+8*3 > len(data) {
-		return nil, ErrInvalidToken
-	}
-	issuedAt := int64(binary.BigEndian.Uint64(data[idx : idx+8]))
-	idx += 8
-	notBefore := int64(binary.BigEndian.Uint64(data[idx : idx+8]))
-	idx += 8
-	expiresAt := int64(binary.BigEndian.Uint64(data[idx : idx+8]))
-	idx += 8
-
-	// CLAIMS
-	if idx+2 > len(data) {
-		return nil, ErrInvalidToken
-	}
-	count := int(data[idx])<<8 | int(data[idx+1])
-	idx += 2
-	claims := make(map[string]any, count)
-	for i := 0; i < count; i++ {
-		k, err := readString(data, &idx)
-		if err != nil {
-			return nil, ErrInvalidToken
-		}
-		v, err := readString(data, &idx)
-		if err != nil {
-			return nil, ErrInvalidToken
-		}
-		var val any
-		if err := json.Unmarshal([]byte(v), &val); err != nil {
-			return nil, ErrInvalidToken
-		}
-		claims[k] = val
-	}
-
-	// FOOTER
-	if idx+2 > len(data) {
-		return nil, ErrInvalidToken
-	}
-	fcount := int(data[idx])<<8 | int(data[idx+1])
-	idx += 2
-	footer := make(map[string]string, fcount)
-	for i := 0; i < fcount; i++ {
-		k, err := readString(data, &idx)
-		if err != nil {
-			return nil, ErrInvalidToken
-		}
-		v, err := readString(data, &idx)
-		if err != nil {
-			return nil, ErrInvalidToken
-		}
-		footer[k] = v
-	}
-
-	// BLACKLISTED FLAG
-	if idx+1 > len(data) {
-		return nil, ErrInvalidToken
-	}
-	black := data[idx] == 1
-
-	t := &Token{
-		Header:      header,
-		ID:          readID,
-		IssuedAt:    time.Unix(0, issuedAt).UTC(),
-		NotBefore:   time.Unix(0, notBefore).UTC(),
-		ExpiresAt:   time.Unix(0, expiresAt).UTC(),
-		Claims:      claims,
-		Footer:      footer,
-		Blacklisted: black,
-	}
-	return t, nil
 }
 
 // KeyManager holds a small ring of currently valid symmetric keys (keyID→keyBytes).

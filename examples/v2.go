@@ -15,21 +15,59 @@ import (
 
 func main() {
 	start := time.Now()
-	symmetricTest()
+	secretTest()
+	secretGeneratorTest()
+	configFileTest()
+	binaryClaimsTest()
 	fmt.Println("Elapsed:", time.Since(start))
+}
 
-	asymmetricTest()
-	claimOperationsTest()
-	deterministicVectorTest()
-	refreshTokenTest()
-	revocationTest()
-	revokeByStringTest()
-	checkRevokedStringTest()
+func secretTest() {
+	// Using the extended charset (includes . $ /)
+	secret, err := token.GenerateSecretStringWithSymbols(32)
+	if err != nil {
+		log.Fatal("secret generation failed:", err)
+	}
+	fmt.Println("Generated Secret with Symbols:", secret)
 
-	// New examples for Shamir Secret Sharing and rotating secret keys:
-	shamirSSSTest()
-	rotateSecretWithKMTest()
-	jwtCompatibleExample()
+	// Or with a generator instance
+	gen := token.NewSecretGenerator()
+	secret1, err := gen.StringWithSymbols(32)
+	if err != nil {
+		log.Fatal("secret generation failed:", err)
+	}
+	fmt.Println("Generated Secret1 with Symbols:", secret1)
+
+	// Alphanumeric only
+	secret2, err := token.GenerateSecretString(16)
+	if err != nil {
+		log.Fatal("secret generation failed:", err)
+	}
+	fmt.Println("Generated Alphanumeric Secret2:", secret2)
+	// Custom character set
+	gen1 := token.NewSecretGenerator()
+	customChars := []byte("ABC123!@#")
+	gen1.WithCustomCharset(customChars)
+	secret3, err := gen1.String(20)
+	if err != nil {
+		log.Fatal("secret generation failed:", err)
+	}
+	fmt.Println("Generated Custom Charset Secret3:", secret3)
+
+	// With prefix
+	gen2 := token.NewSecretGenerator().WithPrefix("sk-")
+	secret4, err := gen2.String(16)
+	if err != nil {
+		log.Fatal("secret generation failed:", err)
+	}
+	fmt.Println("Generated Secret with Prefix:", secret4)
+
+	// With prefix and symbols (first character guaranteed not to be a symbol)
+	secret5, err := gen2.StringWithSymbols(16)
+	if err != nil {
+		log.Fatal("secret generation failed:", err)
+	}
+	fmt.Println("Generated Secret with Symbols:", secret5)
 }
 
 func symmetricTest() {
@@ -106,14 +144,16 @@ func deterministicVectorTest() {
 	fmt.Println("=== Deterministic Token Vector Test ===")
 	now := time.Unix(1700000000, 0)
 	claims := map[string]any{"id": "abc123"}
+	binaryClaims := map[string][]byte{}
 	footer := map[string]string{"aud": "service"}
 
-	t := token.DeterministicToken(now, claims, footer, 10*time.Minute)
+	t := token.DeterministicToken(now, claims, binaryClaims, footer, 10*time.Minute)
 	fmt.Println("Header:", t.Header)
 	fmt.Println("Issued:", t.IssuedAt.UTC())
 	fmt.Println("NotBefore:", t.NotBefore.UTC())
 	fmt.Println("Expires:", t.ExpiresAt.UTC())
 	fmt.Println("Claims:", t.Claims)
+	fmt.Println("BinaryClaims:", t.BinaryClaims)
 	fmt.Println("Footer:", t.Footer)
 	fmt.Println()
 }
@@ -411,6 +451,135 @@ func jwtCompatibleExample() {
 	fmt.Println()
 }
 
+// secretGeneratorTest demonstrates the SecretGenerator and its helpers for generating keys and secrets.
+func secretGeneratorTest() {
+	fmt.Println("=== Secret Generator Test ===")
+
+	// 1) Generate a symmetric key for encryption.
+	symKey, err := token.GenerateSymmetricKey()
+	if err != nil {
+		log.Fatal("GenerateSymmetricKey failed:", err)
+	}
+	fmt.Printf("Generated Symmetric Key: %x\n", symKey)
+
+	// 2) Generate a random secret string (e.g., for API keys).
+	secretStr, err := token.GenerateSecretString(32)
+	if err != nil {
+		log.Fatal("GenerateSecretString failed:", err)
+	}
+	fmt.Println("Generated Secret String:", secretStr)
+
+	// 3) Generate an Ed25519 keypair for signing.
+	pub, priv, err := token.GenerateSigningKeypair()
+	if err != nil {
+		log.Fatal("GenerateSigningKeypair failed:", err)
+	}
+	fmt.Printf("Generated Public Key: %x\n", pub)
+	fmt.Printf("Generated Private Key: %x\n", priv)
+
+	// 4) Use the symmetric key to encrypt a token.
+	t := token.CreateToken(10*time.Minute, token.AlgEncrypt)
+	_ = token.RegisterClaim(t, "user_id", "12345")
+
+	encrypted, err := token.EncryptToken(t, symKey)
+	if err != nil {
+		log.Fatal("EncryptToken failed:", err)
+	}
+	fmt.Println("Token encrypted with generated key:", encrypted)
+
+	// 5) Decrypt the token.
+	decrypted, err := token.DecryptToken(encrypted, symKey)
+	if err != nil {
+		log.Fatal("DecryptToken failed:", err)
+	}
+	fmt.Println("Decrypted claim:", decrypted.Claims)
+
+	// 6) Use the signing keypair to sign a token.
+	t2 := token.CreateToken(1*time.Hour, token.AlgSign)
+	_ = token.RegisterClaim(t2, "role", "user")
+
+	signed, err := token.SignToken(t2, priv)
+	if err != nil {
+		log.Fatal("SignToken failed:", err)
+	}
+	encoded := token.EncodeSignedToken(signed)
+	fmt.Println("Signed token with generated keys:", encoded)
+
+	// 7) Verify the signed token.
+	decoded, err := token.DecodeSignedToken(encoded)
+	if err != nil {
+		log.Fatal("DecodeSignedToken failed:", err)
+	}
+	verified, err := token.VerifyToken(decoded, pub)
+	if err != nil {
+		log.Fatal("VerifyToken failed:", err)
+	}
+	fmt.Println("Verified claim:", verified.Claims)
+
+	fmt.Println()
+}
+
+// binaryClaimsTest demonstrates efficient binary claims storage without JSON base64 overhead.
+func binaryClaimsTest() {
+	fmt.Println("=== Binary Claims Test ===")
+
+	key := make([]byte, 32)
+	_, _ = rand.Read(key)
+
+	// Create a token with both regular and binary claims
+	t := token.CreateToken(10*time.Minute, token.AlgEncrypt)
+	_ = token.RegisterClaim(t, "user_id", "12345")
+	_ = token.RegisterClaim(t, "role", "admin")
+
+	// Add binary data (e.g., a cryptographic signature or encrypted payload)
+	binaryData := make([]byte, 64)
+	_, _ = rand.Read(binaryData)
+	_ = token.RegisterBinaryClaim(t, "signature", binaryData)
+
+	// Another binary claim
+	sessionKey := make([]byte, 32)
+	_, _ = rand.Read(sessionKey)
+	_ = token.RegisterBinaryClaim(t, "session_key", sessionKey)
+
+	fmt.Printf("Binary claim 'signature' length: %d bytes\n", len(binaryData))
+	fmt.Printf("Binary claim 'session_key' length: %d bytes\n", len(sessionKey))
+
+	// Encrypt the token
+	encrypted, err := token.EncryptToken(t, key)
+	if err != nil {
+		log.Fatal("EncryptToken failed:", err)
+	}
+	fmt.Println("Token with binary claims encrypted:", encrypted)
+
+	// Decrypt and verify binary claims are preserved
+	decrypted, err := token.DecryptToken(encrypted, key)
+	if err != nil {
+		log.Fatal("DecryptToken failed:", err)
+	}
+	fmt.Println("Decrypted regular claims:", decrypted.Claims)
+
+	sig, ok := token.GetBinaryClaim(decrypted, "signature")
+	if !ok {
+		log.Fatal("Binary claim 'signature' not found")
+	}
+	if !compare(sig, binaryData) {
+		log.Fatal("Binary claim 'signature' does not match")
+	}
+	fmt.Println("Binary claim 'signature' verified")
+
+	sessKey, ok := token.GetBinaryClaim(decrypted, "session_key")
+	if !ok {
+		log.Fatal("Binary claim 'session_key' not found")
+	}
+	if !compare(sessKey, sessionKey) {
+		log.Fatal("Binary claim 'session_key' does not match")
+	}
+	fmt.Println("Binary claim 'session_key' verified")
+
+	fmt.Println("Binary claims test passed!")
+	fmt.Println()
+}
+
 // compare returns true if two byte slices are equal.
 func compare(a, b []byte) bool {
 	if len(a) != len(b) {
@@ -422,4 +591,48 @@ func compare(a, b []byte) bool {
 		}
 	}
 	return true
+}
+
+// configFileTest demonstrates generating secrets and replacing them in various config file formats.
+func configFileTest() {
+	fmt.Println("=== Config File Secret Replacement Test ===")
+
+	// Test .env file replacement
+	fmt.Println("Testing .env file replacement...")
+	err := token.GenerateSecretInEnvFile("../test_configs/.env", "API_KEY", 32)
+	if err != nil {
+		log.Printf("Env file replacement failed: %v", err)
+	} else {
+		fmt.Println("✓ Successfully replaced API_KEY in .env file")
+	}
+
+	// Test JSON file replacement
+	fmt.Println("Testing JSON file replacement...")
+	err = token.GenerateSecretInJSONFile("../test_configs/config.json", "api_key", 32)
+	if err != nil {
+		log.Printf("JSON file replacement failed: %v", err)
+	} else {
+		fmt.Println("✓ Successfully replaced api_key in JSON file")
+	}
+
+	// Test YAML file replacement
+	fmt.Println("Testing YAML file replacement...")
+	err = token.GenerateSecretInYAMLFile("../test_configs/config.yaml", "api_key", 32)
+	if err != nil {
+		log.Printf("YAML file replacement failed: %v", err)
+	} else {
+		fmt.Println("✓ Successfully replaced api_key in YAML file")
+	}
+
+	// Test BCL file replacement
+	fmt.Println("Testing BCL file replacement...")
+	err = token.GenerateSecretInBCLFile("../test_configs/config.bcl", "api_key", 32)
+	if err != nil {
+		log.Printf("BCL file replacement failed: %v", err)
+	} else {
+		fmt.Println("✓ Successfully replaced api_key in BCL file")
+	}
+
+	fmt.Println("Config file tests completed!")
+	fmt.Println()
 }
