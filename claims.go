@@ -82,21 +82,21 @@ func (c *RegisteredClaims) Valid() error {
 		validationErr.Inner = fmt.Errorf("exp - token is expired, delta is equal to %v", time.Since(*c.Expiration))
 		validationErr.Errors |= ValidationErrorExpired
 	}
-	
+
 	if c.NotBefore != nil && !c.NotBefore.IsZero() && t.Before(*c.NotBefore) {
 		validationErr.Inner = fmt.Errorf("nbf - is not valid yet: %w", validationErr.Inner)
 		validationErr.Errors |= ValidationErrorNotValidYet
 	}
-	
+
 	if c.IssuedAt != nil && !c.IssuedAt.IsZero() && t.Before(*c.IssuedAt) {
 		validationErr.Inner = fmt.Errorf("iss - token is issued in the future: %w", validationErr.Inner)
 		validationErr.Errors |= ValidationErrorIssuedAt
 	}
-	
+
 	if validationErr.Errors != 0 {
 		return validationErr
 	}
-	
+
 	return nil
 }
 
