@@ -224,14 +224,18 @@ func (g *SecretGenerator) String(length int) (string, error) {
 		buf[i] = charset[buf[i]&g.charsetMask]
 	}
 
-	// Zero-copy conversion using unsafe (safe in this context)
+	// Copy out the bytes into a fresh slice before returning.
+	// This prevents returning a string that points to pooled memory which
+	// may be reused and mutated later (security bug / use-after-free).
 	if g.prefix != "" {
-		prefixed := make([]byte, 0, len(g.prefix)+len(buf))
-		prefixed = append(prefixed, []byte(g.prefix)...)
-		prefixed = append(prefixed, buf...)
-		return unsafeBytesToString(prefixed), nil
+		out := make([]byte, 0, len(g.prefix)+length)
+		out = append(out, []byte(g.prefix)...)
+		out = append(out, buf[:length]...)
+		return string(out), nil
 	}
-	return unsafeBytesToString(buf), nil
+	out := make([]byte, length)
+	copy(out, buf[:length])
+	return string(out), nil
 }
 
 // StringUnbiased returns a URL-safe string with perfect uniform distribution.
