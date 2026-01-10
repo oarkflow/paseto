@@ -1,6 +1,8 @@
 package token
 
 import (
+	"encoding/json"
+	"fmt"
 	"sync"
 	"time"
 
@@ -47,9 +49,8 @@ func resetToken(t *Token) {
 		delete(t.Footer, k)
 	}
 	if len(t.RawClaim) > 0 {
-		for i := range t.RawClaim {
-			t.RawClaim[i] = 0
-		}
+		clear(t.RawClaim)
+		t.RawClaim = t.RawClaim[:0]
 	}
 	t.RawClaim = nil
 	t.ID = ""
@@ -71,8 +72,14 @@ var bytePool = sync.Pool{
 
 // appendString appends length-prefixed string to buf: [uint16(len)] + bytes.
 func appendString(buf *[]byte, s string) {
+	if buf == nil {
+		return
+	}
 	b := *buf
 	n := len(s)
+	if n > 65535 {
+		panic("string too long for uint16 length prefix")
+	}
 	b = append(b, byte(n>>8), byte(n))
 	b = append(b, s...)
 	*buf = b
@@ -80,17 +87,28 @@ func appendString(buf *[]byte, s string) {
 
 // readString reads a length-prefixed string from data starting at idx.
 func readString(data []byte, idx *int) (string, error) {
+	if idx == nil {
+		return "", ErrInvalidToken
+	}
 	if *idx+2 > len(data) {
 		return "", ErrInvalidToken
 	}
 	length := int(data[*idx])<<8 | int(data[*idx+1])
 	*idx += 2
-	if *idx+length > len(data) {
+	if length < 0 || *idx+length > len(data) {
 		return "", ErrInvalidToken
 	}
 	s := string(data[*idx : *idx+length])
 	*idx += length
 	return s, nil
+}
+
+// Add a pool for JSON marshaling buffers
+var jsonBufPool = sync.Pool{
+	New: func() any {
+		buf := make([]byte, 0, 256)
+		return &buf
+	},
 }
 
 // Add pools for reusing key slices.
@@ -140,4 +158,63 @@ func (s *serializedBuffer) Release() {
 	*s.ptr = buf[:0]
 	bytePool.Put(s.ptr)
 	s.ptr = nil
+}
+// appendJSON efficiently marshals value to buf without allocations for common types
+func appendJSON(buf *[]byte, v any) error {
+	if buf == nil {
+		return nil
+	}
+	switch val := v.(type) {
+	case string:
+		*buf = append(*buf, '"')
+		*buf = append(*buf, val...)
+		*buf = append(*buf, '"')
+	case int:
+		*buf = appendInt(*buf, int64(val))
+	case int64:
+		*buf = appendInt(*buf, val)
+	case float64:
+		*buf = appendFloat(*buf, val)
+	case bool:
+		if val {
+			*buf = append(*buf, "true"...)
+		} else {
+			*buf = append(*buf, "false"...)
+		}
+	case nil:
+		*buf = append(*buf, "null"...)
+	default:
+		// Fallback to json.Marshal for complex types
+		data, err := json.Marshal(v)
+		if err != nil {
+			return err
+		}
+		*buf = append(*buf, data...)
+	}
+	return nil
+}
+
+func appendInt(buf []byte, val int64) []byte {
+	if val == 0 {
+		return append(buf, '0')
+	}
+	if val < 0 {
+		buf = append(buf, '-')
+		val = -val
+	}
+	start := len(buf)
+	for val > 0 {
+		buf = append(buf, byte('0'+val%10))
+		val /= 10
+	}
+	// Reverse digits
+	for i, j := start, len(buf)-1; i < j; i, j = i+1, j-1 {
+		buf[i], buf[j] = buf[j], buf[i]
+	}
+	return buf
+}
+
+func appendFloat(buf []byte, val float64) []byte {
+	// Simple float formatting - for production use strconv.FormatFloat
+	return append(buf, []byte(fmt.Sprintf("%g", val))...)
 }

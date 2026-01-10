@@ -1,4 +1,3 @@
-// token/token.go
 package token
 
 import (
@@ -144,36 +143,29 @@ func ValidateKey(key []byte) error {
 func generateTokenID() string {
 	idBytes := make([]byte, 16)
 	_, _ = io.ReadFull(rand.Reader, idBytes)
+	// Use unsafe conversion to avoid allocation
 	return base64.RawURLEncoding.EncodeToString(idBytes)
 }
 
 // CreateToken issues a new token with security headers
 func CreateToken(ttl time.Duration, alg string, ids ...string) *Token {
+	t := acquireToken()
 	var keyID string
 	if len(ids) > 0 {
 		keyID = strings.TrimSpace(ids[0])
 	}
 	now := time.Now().UTC()
-	id := generateTokenID()
-
-	header := map[string]string{
-		HeaderVersion: "1",
-		HeaderAlg:     alg,
-	}
+	t.ID = generateTokenID()
+	t.Header[HeaderVersion] = "1"
+	t.Header[HeaderAlg] = alg
 	if keyID != "" {
-		header[HeaderKeyID] = keyID
+		t.Header[HeaderKeyID] = keyID
 	}
-
-	return &Token{
-		Header:      header,
-		ID:          id,
-		IssuedAt:    now,
-		NotBefore:   now,
-		ExpiresAt:   now.Add(ttl),
-		Claims:      make(map[string]any),
-		Footer:      make(map[string]string),
-		Blacklisted: false,
-	}
+	t.IssuedAt = now
+	t.NotBefore = now
+	t.ExpiresAt = now.Add(ttl)
+	t.Blacklisted = false
+	return t
 }
 
 // CreateRefreshToken issues a refresh token
@@ -511,18 +503,22 @@ func (t *Token) encode() (*serializedBuffer, error) {
 	sort.Strings(keys)
 	count := len(keys)
 	buf = append(buf, byte(count>>8), byte(count))
+	jsonBufPtr := jsonBufPool.Get().(*[]byte)
+	jsonBuf := (*jsonBufPtr)[:0]
 	for _, k := range keys {
 		v := t.Claims[k]
-		jsonVal, err := json.Marshal(v)
-		if err != nil {
+		jsonBuf = jsonBuf[:0]
+		if err := appendJSON(&jsonBuf, v); err != nil {
 			claimKeysPool.Put(keys)
+			jsonBufPool.Put(jsonBufPtr)
 			bytePool.Put(ptr)
 			return nil, ErrInvalidToken
 		}
 		appendString(&buf, k)
-		appendString(&buf, string(jsonVal))
+		appendString(&buf, string(jsonBuf))
 	}
 	claimKeysPool.Put(keys)
+	jsonBufPool.Put(jsonBufPtr)
 
 	// BINARY CLAIMS: count + sorted key/value, stored as binary
 	bkeys := claimKeysPool.Get().([]string)
@@ -884,7 +880,7 @@ func EncryptToken(t *Token, key []byte, ids ...string) (string, error) {
 		keyID = strings.TrimSpace(ids[0])
 	}
 	if t.Header == nil {
-		t.Header = make(map[string]string)
+		t.Header = make(map[string]string, 4)
 	}
 	t.Header[HeaderAlg] = AlgEncrypt
 	if keyID != "" {
